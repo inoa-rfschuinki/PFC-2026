@@ -1,15 +1,22 @@
 """
 motor_caixao_areia.py — Motor Matemático do Caixão de Areia (AR Sandbox)
 =========================================================================
-Projeto Final de Curso — Engenharia de Computação (2026)
+Projeto Final de Curso — Engenharia de Computação (AMAN, 2026)
 
-Módulo responsável por toda a lógica matemática e de projeção do sistema:
-  1. Ajuste de plano por Mínimos Quadráticos (SVD)
-  2. Sistema de Coordenadas Kinect → Mesa (Gram-Schmidt + Produto Vetorial)
-  3. Captura 2D de Grid (detecção de tabuleiro de xadrez)
-  4. Projeção 3D → 2D via modelo de câmera de Tsai (cv2.projectPoints)
-  5. Leitura RGBD com Open3D
-  6. Integração com MDE (Modelo Digital de Elevação) e coloração
+Módulo **puro** de álgebra linear e projeção, sem dependência de hardware.
+
+Pipeline Matemático
+-------------------
+1. **Ajuste de plano** — Mínimos Quadráticos via SVD (``ajustar_plano_svd``).
+2. **Referencial da mesa** — Gram-Schmidt + Produto Vetorial
+   (``construir_base_mesa``, ``montar_matriz_transformacao``).
+3. **Detecção de grid** — ``cv2.findChessboardCorners``
+   (``encontrar_cantos_tabuleiro``).
+4. **Projeção 3D → 2D** — Modelo de Tsai via ``cv2.projectPoints``
+   (``projetar_pontos_tsai``, ``calibrar_projetor``).
+5. **Nuvem RGBD** — Conversão Open3D (``criar_nuvem_de_pontos_open3d``).
+6. **Coloração MDE** — Comparação Z_real vs Z_alvo com tolerância
+   (``gerar_mapa_cores``).
 """
 
 from __future__ import annotations

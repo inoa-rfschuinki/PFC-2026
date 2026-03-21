@@ -1,24 +1,26 @@
 """
-mde_cartografia.py — Adaptador de MDE Real via GeoTIFF (Cartografia)
-=====================================================================
-Projeto Final de Curso — Engenharia de Computação (2026)
+mde_cartografia.py — Adaptador de MDE com Fallback Resiliente
+==============================================================
+Projeto Final de Curso — Engenharia de Computação (AMAN, 2026)
 
 Lê um Modelo Digital de Elevação no formato GeoTIFF (.tif) fornecido
 pela equipe de Cartografia, normaliza as elevações para a escala
 física da caixa de areia e expõe consultas pontuais interpoladas.
 
-Dependências externas:
+**Fallback Resiliente**: se o arquivo GeoTIFF não existir, as
+dependências ``rasterio``/``scipy`` não estiverem instaladas, ou
+ocorrer qualquer erro de leitura, o adaptador gera automaticamente
+uma **superfície sintética** (cosseno 2D) para que a demonstração
+nunca pare.
+
+Dependências externas (opcionais)::
+
     pip install rasterio scipy numpy
 
 Uso típico::
 
-    mde = AdaptadorMDE(
-        caminho_geotiff="mapa_terreno.tif",
-        largura_mesa=0.90,      # metros (X)
-        comprimento_mesa=0.60,  # metros (Y)
-        altura_max_areia=0.20,  # metros (Z)
-    )
-    z = mde.obter_z_alvo(0.45, 0.30)  # altura da areia em (x, y)
+    mde = AdaptadorMDE("terreno_aman.tif")
+    z = mde.obter_z_alvo(0.45, 0.30)
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ class AdaptadorMDE:
 
     def __init__(
         self,
-        caminho_geotiff: str,
+        caminho_geotiff: str = "",
         largura_mesa: float = 0.90,
         comprimento_mesa: float = 0.60,
         altura_max_areia: float = 0.20,
@@ -85,14 +87,24 @@ class AdaptadorMDE:
         self._eixo_y: Optional[np.ndarray] = None
         self._interpolador: Optional[RegularGridInterpolator] = None
         self._carregado: bool = False
+        self._usando_sintetico: bool = False
 
         # Metadados do GeoTIFF
         self._z_min_original: float = 0.0
         self._z_max_original: float = 0.0
         self._resolucao_geotiff: Optional[Tuple[float, float]] = None
 
-        # Carregar automaticamente
-        self._carregar(caminho_geotiff)
+        # Tentar carregar o GeoTIFF; se falhar, gerar superfície sintética
+        if caminho_geotiff:
+            try:
+                self._carregar(caminho_geotiff)
+            except (ImportError, FileNotFoundError, Exception) as e:
+                print(f"[MDE] ⚠ Falha ao carregar GeoTIFF: {e}")
+                print("[MDE]   Gerando superfície sintética para demonstração.")
+                self._gerar_superficie_sintetica()
+        else:
+            print("[MDE] Nenhum caminho fornecido — usando superfície sintética.")
+            self._gerar_superficie_sintetica()
 
     # ------------------------------------------------------------------ #
     # Leitura e normalização
@@ -172,6 +184,57 @@ class AdaptadorMDE:
               f"{self._comprimento_mesa:.2f} m")
 
     # ------------------------------------------------------------------ #
+    # Superfície sintética (fallback)
+    # ------------------------------------------------------------------ #
+
+    def _gerar_superficie_sintetica(self, resolucao: int = 100) -> None:
+        """Gera uma superfície matemática cosseno 2D como fallback.
+
+        A superfície produzida é:
+
+        .. math::
+
+            z(x, y) = \\frac{h}{2} \\left(1 + \\cos\\!\\left(
+                \\frac{2\\pi\\,x}{L_x}\\right) \\cdot
+                \\cos\\!\\left(\\frac{2\\pi\\,y}{L_y}\\right)\\right)
+
+        Isso gera uma "colina" suave no centro da mesa que vai de 0 a
+        ``altura_max_areia``, ideal para demonstrar a coloração RGB
+        na apresentação da banca.
+
+        Parameters
+        ----------
+        resolucao : int
+            Número de pontos por eixo na grade sintética.
+        """
+        self._eixo_x = np.linspace(0.0, self._largura_mesa, resolucao)
+        self._eixo_y = np.linspace(0.0, self._comprimento_mesa, resolucao)
+        xx, yy = np.meshgrid(self._eixo_x, self._eixo_y)
+
+        h = self._altura_max_areia
+        self._grade_normalizada = (h / 2.0) * (
+            1.0
+            + np.cos(2 * np.pi * xx / self._largura_mesa)
+            * np.cos(2 * np.pi * yy / self._comprimento_mesa)
+        )
+
+        if RegularGridInterpolator is not None:
+            self._interpolador = RegularGridInterpolator(
+                (self._eixo_y, self._eixo_x),
+                self._grade_normalizada,
+                method="linear",
+                bounds_error=False,
+                fill_value=None,
+            )
+
+        self._z_min_original = 0.0
+        self._z_max_original = h
+        self._carregado = True
+        self._usando_sintetico = True
+        print(f"[MDE] Superfície sintética gerada: {resolucao}×{resolucao}")
+        print(f"[MDE] Z range: 0.000 m → {h:.3f} m")
+
+    # ------------------------------------------------------------------ #
     # Consulta pontual
     # ------------------------------------------------------------------ #
 
@@ -196,15 +259,24 @@ class AdaptadorMDE:
         z_alvo : float
             Altura normalizada em metros, de 0 a ``altura_max_areia``.
         """
-        if not self._carregado or self._interpolador is None:
+        if not self._carregado or self._grade_normalizada is None:
             return 0.0
 
         # Clamp para os limites da mesa
         x_c = max(0.0, min(x, self._largura_mesa))
         y_c = max(0.0, min(y, self._comprimento_mesa))
 
-        # O interpolador recebe (y, x) porque a grade é (linhas, colunas)
-        return float(self._interpolador((y_c, x_c)))
+        # Caminho rápido: interpolador disponível
+        if self._interpolador is not None:
+            return float(self._interpolador((y_c, x_c)))
+
+        # Fallback: nearest-neighbor (scipy não instalado)
+        n_lin, n_col = self._grade_normalizada.shape
+        col = int(round(x_c / self._largura_mesa * (n_col - 1)))
+        lin = int(round(y_c / self._comprimento_mesa * (n_lin - 1)))
+        col = max(0, min(col, n_col - 1))
+        lin = max(0, min(lin, n_lin - 1))
+        return float(self._grade_normalizada[lin, col])
 
     # ------------------------------------------------------------------ #
     # Utilitários
@@ -212,8 +284,13 @@ class AdaptadorMDE:
 
     @property
     def esta_carregado(self) -> bool:
-        """Indica se o GeoTIFF foi carregado com sucesso."""
+        """Indica se o MDE foi carregado (real ou sintético)."""
         return self._carregado
+
+    @property
+    def usando_sintetico(self) -> bool:
+        """``True`` se estiver usando superfície sintética (fallback)."""
+        return self._usando_sintetico
 
     @property
     def dimensoes_mesa(self) -> Tuple[float, float, float]:
