@@ -13,13 +13,20 @@
 
 ## Visão Geral
 
-O **AR Sandbox** projeta, em tempo real, um mapa de cores sobre uma caixa de areia física.  Um sensor **Microsoft Kinect** captura a topografia da areia, o motor matemático compara cada ponto com um **Modelo Digital de Elevação (MDE)** de referência, e um projetor exibe o feedback visual diretamente na superfície:
+O **AR Sandbox** projeta, em tempo real, um mapa de cores sobre uma caixa de areia física de **1,5 m × 1,5 m** com até **30 cm de profundidade**.  Um sensor **Microsoft Kinect** montado a **2,5 m de altura** captura a topografia da areia, o motor matemático compara cada ponto com um **Modelo Digital de Elevação (MDE)** de referência, e um projetor exibe o feedback visual diretamente na superfície:
 
 | Cor | Significado | Ação |
 |---|---|---|
 | 🔴 **Vermelho** | Areia acima do alvo | Cavar |
 | 🔵 **Azul** | Areia abaixo do alvo | Preencher |
 | 🟢 **Verde** | Dentro da tolerância | OK |
+
+O sistema exibe **duas janelas simultâneas**:
+
+| Janela | Conteúdo |
+|---|---|
+| **Projecao_Areia** | Feedback AR em tempo real (vermelho/azul/verde) — enviada ao projetor |
+| **Gabarito_MDE** | Heatmap de referência do MDE sendo replicado — monitor do operador |
 
 O sistema é **100% Plug & Play**: funciona com ou sem o Kinect conectado (modo simulação automático) e cria uma superfície matemática de fallback caso o arquivo GeoTIFF não esteja presente.
 
@@ -32,6 +39,9 @@ O sistema é **100% Plug & Play**: funciona com ou sem o Kinect conectado (modo 
 │                    main.py                              │
 │            Máquina de Estados (Orquestrador)            │
 │  INIT → IDLE → CALIBRACAO → AR_LOOP → (loop contínuo)  │
+│                                                         │
+│  Janelas:  Projecao_Areia ← AR feedback (projetor)     │
+│            Gabarito_MDE   ← Heatmap referência (monitor)│
 └───────────┬──────────────┬──────────────┬───────────────┘
             │              │              │
    ┌────────▼────────┐ ┌──▼───────────┐ ┌▼──────────────┐
@@ -40,17 +50,17 @@ O sistema é **100% Plug & Play**: funciona com ou sem o Kinect conectado (modo 
    │ (OOP + Fallback) │ │ (Álgebra     │ │ AdaptadorMDE  │
    │                  │ │  Linear)     │ │ (GeoTIFF +    │
    │ Open3D/freenect  │ │ SVD, Gram-   │ │  Fallback     │
-   │ → Simulação auto │ │ Schmidt,     │ │  Sintético)   │
-   └──────────────────┘ │ Tsai         │ └───────────────┘
-                        └──────────────┘
+   │ → Simulação auto │ │ Schmidt,     │ │  Sintético +  │
+   │ Kinect a 2.5 m   │ │ Tsai         │ │  Heatmap)     │
+   └──────────────────┘ └──────────────┘ └───────────────┘
 ```
 
 | Camada | Módulo | Responsabilidade |
 |---|---|---|
-| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: tenta Open3D → freenect → simulação automática |
+| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: tenta Open3D → freenect → simulação automática (Kinect a 2,5 m) |
 | **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai |
-| **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF com rasterio → fallback cosseno 2D |
-| **Orquestração** | `main.py` | Máquina de estados com 4 estados e controle via `cv2.waitKey` |
+| **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF com rasterio → fallback cosseno 2D + `gerar_imagem_visualizacao()` (heatmap) |
+| **Orquestração** | `main.py` | Máquina de estados com 4 estados, dual-window (Projecao_Areia + Gabarito_MDE) |
 
 ---
 
@@ -61,14 +71,7 @@ PFC-2026/
 ├── main.py                    # Máquina de Estados — ponto de entrada
 ├── kinect_sensor.py           # KinectSensor OOP com fallback simulação
 ├── motor_caixao_areia.py      # Motor matemático (SVD, Gram-Schmidt, Tsai)
-├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback sintético
-│
-├── kinect.py                  # Captura original (Raquel) — legado
-├── exibicao.py                # Colorização e exibição (Raquel) — legado
-├── utils.py                   # Utilitários: FPS, log (Raquel) — legado
-├── testekinect.py             # Testes manuais do sensor (Raquel) — legado
-├── adaptador_mde.py           # Adaptador MDE mock original — legado
-├── app_integrado.py           # Pipeline anterior — legado
+├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback sintético + heatmap
 │
 ├── test_motor_caixao.py       # 26 testes unitários automatizados
 ├── DOCUMENTACAO_TECNICA.md    # Documentação técnica para a banca
@@ -164,6 +167,10 @@ Edite as variáveis no topo de `main.py`:
 ```python
 CAMINHO_GEOTIFF = "terreno_aman.tif"   # arquivo da Cartografia
 TOLERANCIA_COR  = 5.0                  # mm
+LARGURA_MESA    = 1.50                 # metros (1,5 m)
+COMPRIMENTO_MESA = 1.50               # metros (1,5 m)
+ALTURA_MAX_AREIA = 0.30               # metros (30 cm)
+ALTURA_KINECT   = 2.50                # metros (2,5 m)
 FORCAR_SIMULACAO = False               # True para ignorar o Kinect
 ```
 
@@ -178,17 +185,18 @@ python main.py
 | Tecla | Estado | Ação |
 |---|---|---|
 | **C** | IDLE / AR_LOOP | Calibrar (captura plano + base + matriz 4×4) |
-| **F** | AR_LOOP | Toggle tela cheia (para o projetor) |
+| **F** | AR_LOOP | Toggle tela cheia na janela Projecao_Areia (para o projetor) |
 | **Q** / **ESC** | Qualquer | Encerrar o sistema |
 
 ### Fluxo da demonstração para a banca
 
-1. Execute `python main.py` — o sistema mostra o mapa de profundidade em cores.
+1. Execute `python main.py` — abrem duas janelas: **Projecao_Areia** (profundidade colorida) e **Gabarito_MDE** (heatmap de referência).
 2. Posicione o sensor (ou use simulação) e aperte **C** — a calibração SVD roda em ~0.2s.
-3. A projeção AR inicia automaticamente — as cores vermelho/azul/verde aparecem.
-4. Modele a areia (ou observe a simulação) — as cores mudam em tempo real.
-5. Aperte **C** novamente para recalibrar se necessário.
-6. Aperte **Q** para encerrar.
+3. A projeção AR inicia automaticamente — as cores vermelho/azul/verde aparecem na janela **Projecao_Areia**.
+4. O **Gabarito_MDE** mostra o heatmap do terreno que está sendo replicado — referência visual para o operador.
+5. Modele a areia (ou observe a simulação) — as cores mudam em tempo real.
+6. Aperte **C** novamente para recalibrar se necessário.
+7. Aperte **Q** para encerrar.
 
 ### Rodando com o Kinect real
 
@@ -229,9 +237,11 @@ python -m unittest test_motor_caixao -v
 ### Software (Pronto)
 
 - ✅ Máquina de estados `main.py` com 4 estados + transições via teclado
-- ✅ `KinectSensor` OOP com fallback automático Open3D → freenect → simulação
+- ✅ **Dual-window**: Projecao_Areia (AR feedback) + Gabarito_MDE (heatmap referência)
+- ✅ `KinectSensor` OOP com fallback automático Open3D → freenect → simulação (Kinect a 2,5 m)
 - ✅ Motor matemático completo (SVD, Gram-Schmidt, Afim 4×4, Tsai)
-- ✅ `AdaptadorMDE` com leitura GeoTIFF + fallback cosseno 2D
+- ✅ `AdaptadorMDE` com leitura GeoTIFF + fallback cosseno 2D + `gerar_imagem_visualizacao()`
+- ✅ Dimensões reais: caixa 1,5 m × 1,5 m × 0,3 m, Kinect a 2,5 m
 - ✅ Coloração MDE (Vermelho/Azul/Verde) por diferença de altitude
 - ✅ Projeção 3D → 2D via `cv2.projectPoints`
 - ✅ Tela cheia para projetor (`cv2.WINDOW_FULLSCREEN`)

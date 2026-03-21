@@ -6,6 +6,16 @@ Projeto Final de Curso — Engenharia de Computação (AMAN, 2026)
 Script **Plug & Play** que orquestra todo o pipeline do Caixão de
 Areia com Realidade Aumentada.  Funciona com ou sem Kinect conectado.
 
+Dimensões físicas reais
+-----------------------
+- Caixa de areia: 1,5 m × 1,5 m × 0,3 m de profundidade
+- Kinect montado a 2,5 m de altura
+
+Janelas de saída
+----------------
+- **Projecao_Areia** — feedback AR do projetor (vermelho/azul/verde)
+- **Gabarito_MDE** — heatmap de referência do MDE sendo replicado
+
 Máquina de Estados
 ------------------
 INIT
@@ -70,20 +80,26 @@ RESOLUCAO_PROJETOR: tuple[int, int] = (640, 480)
 TOLERANCIA_COR: float = 5.0
 """Tolerância (mm) para a classificação Vermelho/Azul/Verde."""
 
-LARGURA_MESA: float = 0.90
-"""Dimensão X da caixa de areia em metros."""
+LARGURA_MESA: float = 1.50
+"""Dimensão X da caixa de areia em metros (1,5 m)."""
 
-COMPRIMENTO_MESA: float = 0.60
-"""Dimensão Y da caixa de areia em metros."""
+COMPRIMENTO_MESA: float = 1.50
+"""Dimensão Y da caixa de areia em metros (1,5 m)."""
 
-ALTURA_MAX_AREIA: float = 0.20
-"""Espessura máxima de areia mapeável em metros."""
+ALTURA_MAX_AREIA: float = 0.30
+"""Espessura máxima de areia mapeável em metros (30 cm)."""
+
+ALTURA_KINECT: float = 2.50
+"""Altura de montagem do Kinect acima da mesa, em metros."""
 
 FORCAR_SIMULACAO: bool = False
 """Se ``True``, ignora o Kinect e usa nuvem sintética."""
 
-NOME_JANELA: str = "AR Sandbox — PFC 2026"
-"""Nome da janela OpenCV de projeção."""
+JANELA_PROJECAO: str = "Projecao_Areia"
+"""Nome da janela OpenCV de projeção AR (para o projetor)."""
+
+JANELA_GABARITO: str = "Gabarito_MDE"
+"""Nome da janela OpenCV com o heatmap de referência do MDE."""
 
 # =====================================================================
 # Logging
@@ -285,6 +301,8 @@ def main() -> None:
     print("╔══════════════════════════════════════════════════╗")
     print("║     CAIXÃO DE AREIA — AR Sandbox                ║")
     print("║     PFC Engenharia de Computação — AMAN 2026    ║")
+    print("║     Mesa: 1.5 m × 1.5 m × 0.3 m                ║")
+    print("║     Kinect: 2.5 m de altura                     ║")
     print("╚══════════════════════════════════════════════════╝")
     print()
 
@@ -292,6 +310,7 @@ def main() -> None:
     sensor: Optional[KinectSensor] = None
     mde: Optional[AdaptadorMDE] = None
     calibracao: Optional[DadosCalibracao] = None
+    imagem_gabarito: Optional[np.ndarray] = None
     t_anterior = time.time()
 
     while estado != Estado.ENCERRAR:
@@ -316,13 +335,27 @@ def main() -> None:
                 altura_max_areia=ALTURA_MAX_AREIA,
             )
 
-            # Criar janela OpenCV
-            cv2.namedWindow(NOME_JANELA, cv2.WINDOW_NORMAL)
+            # Gerar heatmap do MDE (exibido na janela Gabarito)
+            imagem_gabarito = mde.gerar_imagem_visualizacao(
+                largura=RESOLUCAO_PROJETOR[0],
+                altura=RESOLUCAO_PROJETOR[1],
+            )
 
+            # Criar janelas OpenCV — dual display
+            cv2.namedWindow(JANELA_PROJECAO, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(JANELA_GABARITO, cv2.WINDOW_NORMAL)
+
+            # Exibir heatmap do MDE imediatamente
+            cv2.imshow(JANELA_GABARITO, imagem_gabarito)
+
+            print()
+            print("Janelas:")
+            print(f"  [{JANELA_PROJECAO}] Projeção AR (vermelho/azul/verde)")
+            print(f"  [{JANELA_GABARITO}] Heatmap de referência do MDE")
             print()
             print("Teclas:")
             print("  [C] Calibrar plano da mesa (SVD + Gram-Schmidt)")
-            print("  [F] Tela cheia ON/OFF")
+            print("  [F] Tela cheia ON/OFF (janela de projeção)")
             print("  [Q] ou [ESC] Encerrar")
             print()
             estado = Estado.IDLE
@@ -343,7 +376,8 @@ def main() -> None:
                 (255, 255, 255),
                 2,
             )
-            cv2.imshow(NOME_JANELA, imagem)
+            cv2.imshow(JANELA_PROJECAO, imagem)
+            cv2.imshow(JANELA_GABARITO, imagem_gabarito)
 
             tecla = cv2.waitKey(30) & 0xFF
             if tecla in (ord("c"), ord("C")):
@@ -390,7 +424,8 @@ def main() -> None:
                 (200, 200, 200),
                 1,
             )
-            cv2.imshow(NOME_JANELA, imagem_ar)
+            cv2.imshow(JANELA_PROJECAO, imagem_ar)
+            cv2.imshow(JANELA_GABARITO, imagem_gabarito)
 
             tecla = cv2.waitKey(1) & 0xFF
             if tecla in (ord("c"), ord("C")):
@@ -398,19 +433,19 @@ def main() -> None:
             elif tecla in (ord("q"), ord("Q"), 27):
                 estado = Estado.ENCERRAR
             elif tecla in (ord("f"), ord("F")):
-                # Toggle tela cheia
+                # Toggle tela cheia (janela de projeção)
                 prop = cv2.getWindowProperty(
-                    NOME_JANELA, cv2.WND_PROP_FULLSCREEN
+                    JANELA_PROJECAO, cv2.WND_PROP_FULLSCREEN
                 )
                 if prop == cv2.WINDOW_FULLSCREEN:
                     cv2.setWindowProperty(
-                        NOME_JANELA,
+                        JANELA_PROJECAO,
                         cv2.WND_PROP_FULLSCREEN,
                         cv2.WINDOW_NORMAL,
                     )
                 else:
                     cv2.setWindowProperty(
-                        NOME_JANELA,
+                        JANELA_PROJECAO,
                         cv2.WND_PROP_FULLSCREEN,
                         cv2.WINDOW_FULLSCREEN,
                     )

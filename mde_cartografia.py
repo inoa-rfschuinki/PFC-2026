@@ -72,9 +72,9 @@ class AdaptadorMDE:
     def __init__(
         self,
         caminho_geotiff: str = "",
-        largura_mesa: float = 0.90,
-        comprimento_mesa: float = 0.60,
-        altura_max_areia: float = 0.20,
+        largura_mesa: float = 1.50,
+        comprimento_mesa: float = 1.50,
+        altura_max_areia: float = 0.30,
     ) -> None:
         # Dimensões físicas da mesa
         self._largura_mesa = largura_mesa
@@ -277,6 +277,84 @@ class AdaptadorMDE:
         col = max(0, min(col, n_col - 1))
         lin = max(0, min(lin, n_lin - 1))
         return float(self._grade_normalizada[lin, col])
+
+    # ------------------------------------------------------------------ #
+    # Visualização — heatmap do MDE
+    # ------------------------------------------------------------------ #
+
+    def gerar_imagem_visualizacao(
+        self,
+        largura: int = 480,
+        altura: int = 480,
+        colormap: int = 4,  # cv2.COLORMAP_TURBO = 20, COLORMAP_JET = 2, COLORMAP_INFERNO = 11
+    ) -> np.ndarray:
+        """Gera uma imagem BGR com heatmap da grade de elevações normalizada.
+
+        Se o MDE não estiver carregado, retorna uma imagem preta com
+        texto informativo.
+
+        Parameters
+        ----------
+        largura : int
+            Largura da imagem de saída em pixels.
+        altura : int
+            Altura da imagem de saída em pixels.
+        colormap : int
+            Código ``cv2.COLORMAP_*``.  Padrão: ``cv2.COLORMAP_TURBO`` (20).
+
+        Returns
+        -------
+        np.ndarray, shape (altura, largura, 3), dtype uint8
+            Imagem BGR com o heatmap do MDE.
+        """
+        import cv2
+
+        if not self._carregado or self._grade_normalizada is None:
+            img = np.zeros((altura, largura, 3), dtype=np.uint8)
+            cv2.putText(
+                img, "MDE nao carregado", (10, altura // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
+            )
+            return img
+
+        # Normalizar grade para [0, 255]
+        grade = self._grade_normalizada.astype(np.float64)
+        g_min, g_max = grade.min(), grade.max()
+        if g_max - g_min < 1e-12:
+            norm = np.full_like(grade, 128, dtype=np.uint8)
+        else:
+            norm = ((grade - g_min) / (g_max - g_min) * 255).astype(np.uint8)
+
+        # Aplicar colormap
+        heatmap = cv2.applyColorMap(norm, colormap)
+
+        # Redimensionar para a resolução desejada
+        heatmap = cv2.resize(heatmap, (largura, altura), interpolation=cv2.INTER_LINEAR)
+
+        # Adicionar barra de escala com rótulos
+        fonte = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(
+            heatmap,
+            f"Z: {self._z_min_original:.1f} m",
+            (5, altura - 10),
+            fonte, 0.4, (255, 255, 255), 1,
+        )
+        cv2.putText(
+            heatmap,
+            f"Z: {self._z_max_original:.1f} m",
+            (5, 20),
+            fonte, 0.4, (255, 255, 255), 1,
+        )
+
+        tipo = "Sintetico" if self._usando_sintetico else "GeoTIFF"
+        cv2.putText(
+            heatmap,
+            f"MDE ({tipo})",
+            (largura - 160, 20),
+            fonte, 0.4, (255, 255, 255), 1,
+        )
+
+        return heatmap
 
     # ------------------------------------------------------------------ #
     # Utilitários

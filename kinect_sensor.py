@@ -241,16 +241,18 @@ class KinectSensor:
     def _profundidade_simulada(self) -> np.ndarray:
         """Gera um mapa de profundidade sintético (colina gaussiana + ruído).
 
-        Reproduz o formato que o Kinect v1 entregaria: ``(480, 640)`` uint16
-        com valores em milímetros.  A colina central varia no tempo para
-        simular uma "mão movendo a areia".
+        Simula o sensor montado a 2,5 m da mesa.  A profundidade base
+        é **2500 mm** e a colina central varia no tempo para simular
+        uma "mão movendo a areia" (até ~300 mm de amplitude, compatível
+        com ``ALTURA_MAX_AREIA = 0.30 m``).
 
         Returns
         -------
         np.ndarray, shape (480, 640), dtype uint16
         """
         w, h = self.resolucao
-        profundidade = np.full((h, w), 1000, dtype=np.float32)
+        # Kinect montado a 2,5 m → profundidade base = 2500 mm
+        profundidade = np.full((h, w), 2500, dtype=np.float32)
 
         u = np.arange(w)
         v = np.arange(h)
@@ -258,10 +260,10 @@ class KinectSensor:
 
         # Colina gaussiana no centro — leve oscilação temporal
         fase = time.time() % (2 * np.pi)
-        amp = 150 + 20 * np.sin(fase)
+        amp = 200 + 30 * np.sin(fase)
         colina = amp * np.exp(
-            -(((uu - w // 2) ** 2) / (2 * 120 ** 2)
-              + ((vv - h // 2) ** 2) / (2 * 90 ** 2))
+            -(((uu - w // 2) ** 2) / (2 * 160 ** 2)
+              + ((vv - h // 2) ** 2) / (2 * 160 ** 2))
         )
         profundidade -= colina
 
