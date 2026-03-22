@@ -10,8 +10,8 @@ física da caixa de areia e expõe consultas pontuais interpoladas.
 **Fallback Resiliente**: se o arquivo GeoTIFF não existir, as
 dependências ``rasterio``/``scipy`` não estiverem instaladas, ou
 ocorrer qualquer erro de leitura, o adaptador gera automaticamente
-uma **superfície sintética** (cosseno 2D) para que a demonstração
-nunca pare.
+um **Morro Gaussiano** sintético (pico de 0.30 m no centro, caindo
+a 0 nas bordas) para que a demonstração nunca pare.
 
 Dependências externas (opcionais)::
 

@@ -6,20 +6,20 @@
 ![Testes](https://img.shields.io/badge/Testes_Unitários-26_passing-brightgreen)
 ![Licença](https://img.shields.io/badge/Licença-Acadêmica-lightgrey)
 
-**Projeto Final de Curso (PFC) — Engenharia de Computação & Engenharia Eletrônica**  
+**Projeto Final de Curso (PFC) — Engenharia de Computação & Engenharia Eletrônica**
 **Academia Militar das Agulhas Negras (AMAN) — 2026**
 
 ---
 
 ## Visão Geral
 
-O **AR Sandbox** projeta, em tempo real, um mapa de cores sobre uma caixa de areia física de **1,5 m × 1,5 m** com até **30 cm de profundidade**.  Um sensor **Microsoft Kinect** montado a **2,5 m de altura** captura a topografia da areia, o motor matemático compara cada ponto com um **Modelo Digital de Elevação (MDE)** de referência, e um projetor exibe o feedback visual diretamente na superfície:
+O **AR Sandbox** projeta, em tempo real, um mapa de cores sobre uma caixa de areia física de **1,5 m × 1,5 m** com até **30 cm de profundidade**. Um sensor **Microsoft Kinect** montado a **2,5 m de altura** captura a topografia da areia, o motor matemático compara cada ponto com um **Modelo Digital de Elevação (MDE)** de referência no formato **GeoTIFF**, e um projetor exibe o feedback visual diretamente na superfície:
 
-| Cor | Significado | Ação |
+| Cor | Condição | Significado |
 |---|---|---|
-| 🔴 **Vermelho** | Areia acima do alvo | Cavar |
-| 🔵 **Azul** | Areia abaixo do alvo | Preencher |
-| 🟢 **Verde** | Dentro da tolerância | OK |
+| 🔴 **Vermelho** | $Z_{real} > Z_{MDE} + 0{,}02\text{ m}$ | Areia em excesso — **Cavar** |
+| 🔵 **Azul** | $Z_{real} < Z_{MDE} - 0{,}02\text{ m}$ | Areia insuficiente — **Preencher** |
+| 🟢 **Verde** | Diferença $\leq 0{,}02\text{ m}$ | Dentro da tolerância — **OK** |
 
 O sistema exibe **duas janelas simultâneas**:
 
@@ -28,7 +28,13 @@ O sistema exibe **duas janelas simultâneas**:
 | **Projecao_Areia** | Feedback AR em tempo real (vermelho/azul/verde) — enviada ao projetor |
 | **Gabarito_MDE** | Heatmap de referência do MDE sendo replicado — monitor do operador |
 
-O sistema é **100% Plug & Play**: funciona com ou sem o Kinect conectado (modo simulação automático) e cria uma superfície matemática de fallback caso o arquivo GeoTIFF não esteja presente.
+### Resiliência Total — Zero Crash na Apresentação
+
+O sistema é **100% Plug & Play**: funciona em qualquer máquina, com ou sem hardware.
+
+- **Sem Kinect?** → O `KinectSensor` gera automaticamente uma nuvem de pontos simulando areia nivelada a **15 cm** (plano reto no grid $[0, 1.5] \times [0, 1.5]$ m).
+- **Sem GeoTIFF?** → O `AdaptadorMDE` gera automaticamente um **Morro Gaussiano** no centro da mesa (pico de 30 cm caindo para 0 nas bordas).
+- **Resultado da Simulação** → As **três cores** convivem na mesma imagem: bordas vermelhas, anel intermediário verde e centro azul.
 
 ---
 
@@ -50,17 +56,17 @@ O sistema é **100% Plug & Play**: funciona com ou sem o Kinect conectado (modo 
    │ (OOP + Fallback) │ │ (Álgebra     │ │ AdaptadorMDE  │
    │                  │ │  Linear)     │ │ (GeoTIFF +    │
    │ Open3D/freenect  │ │ SVD, Gram-   │ │  Fallback     │
-   │ → Simulação auto │ │ Schmidt,     │ │  Sintético +  │
+   │ → Simulação auto │ │ Schmidt,     │ │  Gaussiano +  │
    │ Kinect a 2.5 m   │ │ Tsai         │ │  Heatmap)     │
    └──────────────────┘ └──────────────┘ └───────────────┘
 ```
 
 | Camada | Módulo | Responsabilidade |
 |---|---|---|
-| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: tenta Open3D → freenect → simulação automática (Kinect a 2,5 m) |
-| **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai |
-| **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF com rasterio → fallback cosseno 2D + `gerar_imagem_visualizacao()` (heatmap) |
-| **Orquestração** | `main.py` | Máquina de estados com 4 estados, dual-window (Projecao_Areia + Gabarito_MDE) |
+| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: Open3D → freenect → simulação automática (plano a 15 cm) |
+| **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai, coloração |
+| **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF via rasterio → fallback Morro Gaussiano + heatmap |
+| **Orquestração** | `main.py` | Máquina de estados (INIT/IDLE/CALIBRACAO/AR_LOOP), dual-window |
 
 ---
 
@@ -71,141 +77,103 @@ PFC-2026/
 ├── main.py                    # Máquina de Estados — ponto de entrada
 ├── kinect_sensor.py           # KinectSensor OOP com fallback simulação
 ├── motor_caixao_areia.py      # Motor matemático (SVD, Gram-Schmidt, Tsai)
-├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback sintético + heatmap
+├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback Gaussiano + heatmap
 │
 ├── test_motor_caixao.py       # 26 testes unitários automatizados
-├── DOCUMENTACAO_TECNICA.md    # Documentação técnica para a banca
+├── DOCUMENTACAO_OFICIAL.md    # Documentação acadêmica completa para a banca
 └── README.md                  # Este arquivo
 ```
 
 ---
 
-## Pipeline Matemático
+## Como Instalar
 
-### Passo 1 — Ajuste de Plano via SVD
-
-A nuvem de pontos bruta é centralizada no centroide e decomposta via **SVD** ($U \Sigma V^T$).  O vetor singular associado ao menor valor singular fornece a **normal** do plano da mesa:
-
-$$ax + by + cz + d = 0, \quad d = -\mathbf{n} \cdot \bar{\mathbf{p}}$$
-
-### Passo 2 — Referencial da Mesa (Gram-Schmidt)
-
-A normal vira o eixo $Z_\text{mesa}$.  **Gram-Schmidt** ortogonaliza um vetor semente para gerar $X_\text{mesa}$, e o **produto vetorial** completa a base:
-
-$$X = \text{GS}(\text{semente}, Z), \quad Y = Z \times X$$
-
-### Passo 3 — Transformação Afim 4×4
-
-A matriz $T$ leva coordenadas do Kinect para o referencial da mesa:
-
-$$\mathbf{p}_\text{mesa} = T \cdot \begin{bmatrix} \mathbf{p}_\text{kinect} \\ 1 \end{bmatrix}, \quad T = \begin{bmatrix} R & -R \cdot \bar{\mathbf{p}} \\ 0^T & 1 \end{bmatrix}$$
-
-Pontos sobre o plano resultam em $z_\text{mesa} = 0$.
-
-### Passo 4 — Projeção Pinhole (Tsai)
-
-Converte pontos 3D da mesa em pixels 2D do projetor via `cv2.projectPoints`:
-
-$$u = f_x \cdot \frac{X}{Z} + c_x, \quad v = f_y \cdot \frac{Y}{Z} + c_y$$
-
-### Passo 5 — Coloração por Diferença
-
-Compara $z_\text{real}$ (medido) com $z_\text{MDE}$ (esperado):
-
-| Condição | Cor |
-|---|---|
-| $z_\text{real} > z_\text{MDE} + \epsilon$ | Vermelho |
-| $z_\text{real} < z_\text{MDE} - \epsilon$ | Azul |
-| caso contrário | Verde |
-
----
-
-## Resiliência — Zero Crash na Apresentação
-
-O sistema implementa **fallback em cascata** em dois pontos críticos:
-
-### Sensor (kinect_sensor.py)
-
-```
-Inicialização do KinectSensor:
-  1. Tenta Open3D (Azure Kinect / RealSense)  →  sucesso? usa.
-  2. Tenta freenect (Kinect v1)                →  sucesso? usa.
-  3. Ambos falharam?  →  "⚠ Modo Simulação"   →  nuvem sintética.
-```
-
-### MDE (mde_cartografia.py)
-
-```
-Inicialização do AdaptadorMDE:
-  1. Tenta ler GeoTIFF com rasterio  →  sucesso? usa.
-  2. Arquivo não existe / rasterio não instalado?
-     →  Gera superfície cosseno 2D automaticamente.
-```
-
-**Resultado**: `python main.py` funciona em qualquer máquina, em qualquer momento, sem nenhuma dependência externa obrigatória além de numpy e opencv.
-
----
-
-## Como Rodar — Passo a Passo
-
-### 1. Instalar dependências
+### Dependências obrigatórias
 
 ```bash
 pip install numpy opencv-python
 ```
 
-Opcionais (para GeoTIFF real e nuvem RGBD):
+### Dependências opcionais (GeoTIFF real, interpolação, nuvem RGBD)
 
 ```bash
 pip install rasterio scipy open3d
 ```
 
-### 2. Configurar (opcional)
+### Testes
 
-Edite as variáveis no topo de `main.py`:
-
-```python
-CAMINHO_GEOTIFF = "terreno_aman.tif"   # arquivo da Cartografia
-TOLERANCIA_COR  = 5.0                  # mm
-LARGURA_MESA    = 1.50                 # metros (1,5 m)
-COMPRIMENTO_MESA = 1.50               # metros (1,5 m)
-ALTURA_MAX_AREIA = 0.30               # metros (30 cm)
-ALTURA_KINECT   = 2.50                # metros (2,5 m)
-FORCAR_SIMULACAO = False               # True para ignorar o Kinect
+```bash
+pip install pytest   # opcional, unittest funciona nativamente
 ```
 
-### 3. Rodar o sistema
+---
+
+## Como Executar
+
+### Modo Simulação (sem hardware — padrão automático)
 
 ```bash
 python main.py
 ```
 
-### 4. Operar o sistema
+Se nenhum Kinect estiver conectado e nenhum GeoTIFF estiver presente, o sistema entra **automaticamente** em modo simulação completo. Nenhuma configuração necessária.
 
-| Tecla | Estado | Ação |
-|---|---|---|
-| **C** | IDLE / AR_LOOP | Calibrar (captura plano + base + matriz 4×4) |
-| **F** | AR_LOOP | Toggle tela cheia na janela Projecao_Areia (para o projetor) |
-| **Q** / **ESC** | Qualquer | Encerrar o sistema |
+Para forçar o modo simulação mesmo com Kinect conectado, edite no topo de `main.py`:
 
-### Fluxo da demonstração para a banca
+```python
+FORCAR_SIMULACAO = True
+```
 
-1. Execute `python main.py` — abrem duas janelas: **Projecao_Areia** (profundidade colorida) e **Gabarito_MDE** (heatmap de referência).
-2. Posicione o sensor (ou use simulação) e aperte **C** — a calibração SVD roda em ~0.2s.
-3. A projeção AR inicia automaticamente — as cores vermelho/azul/verde aparecem na janela **Projecao_Areia**.
-4. O **Gabarito_MDE** mostra o heatmap do terreno que está sendo replicado — referência visual para o operador.
-5. Modele a areia (ou observe a simulação) — as cores mudam em tempo real.
-6. Aperte **C** novamente para recalibrar se necessário.
-7. Aperte **Q** para encerrar.
+### Modo Hardware Real (Kinect + GeoTIFF)
 
-### Rodando com o Kinect real
+1. Conecte o Kinect via USB.
+2. Coloque o arquivo GeoTIFF (`.tif`) no diretório do projeto.
+3. Edite o caminho no topo de `main.py`:
 
-Basta conectar o Kinect por USB.  O `KinectSensor` detecta automaticamente:
+```python
+CAMINHO_GEOTIFF = "terreno_aman.tif"
+```
 
-- **Azure Kinect**: via Open3D (precisa de `pip install open3d`)
-- **Kinect v1**: via freenect (precisa de `sudo apt-get install freenect python3-freenect` no Linux)
+4. Execute:
 
-Se nenhum sensor for detectado, entra em simulação automaticamente.
+```bash
+python main.py
+```
+
+O `KinectSensor` detecta automaticamente:
+
+- **Azure Kinect / RealSense** → via Open3D
+- **Kinect v1** → via freenect / libfreenect
+
+### Configuração (topo de `main.py`)
+
+```python
+CAMINHO_GEOTIFF   = "terreno_aman.tif"    # Arquivo MDE da Cartografia
+TOLERANCIA_COR    = 0.02                  # metros (2 cm)
+LARGURA_MESA      = 1.50                  # metros
+COMPRIMENTO_MESA  = 1.50                  # metros
+ALTURA_MAX_AREIA  = 0.30                  # metros (30 cm)
+ALTURA_KINECT     = 2.50                  # metros
+FORCAR_SIMULACAO  = False                 # True para ignorar Kinect
+```
+
+---
+
+## Operação do Sistema
+
+| Tecla | Ação |
+|---|---|
+| **C** | Calibrar (SVD + Gram-Schmidt + Matriz 4×4) |
+| **F** | Toggle tela cheia na janela Projecao_Areia |
+| **Q** / **ESC** | Encerrar |
+
+### Fluxo de Demonstração para a Banca
+
+1. Execute `python main.py` — abrem duas janelas: **Projecao_Areia** e **Gabarito_MDE**.
+2. Pressione **C** — a calibração SVD + Gram-Schmidt executa instantaneamente.
+3. A projeção AR inicia no **AR_LOOP**: as três cores (vermelho/azul/verde) aparecem na janela de projeção.
+4. O **Gabarito_MDE** exibe o heatmap do Morro Gaussiano de referência.
+5. Pressione **F** para tela cheia (projetor) ou **Q** para encerrar.
 
 ---
 
@@ -213,49 +181,22 @@ Se nenhum sensor for detectado, entra em simulação automaticamente.
 
 26 testes automatizados cobrindo todo o motor matemático:
 
+```bash
+python -m unittest test_motor_caixao -v
+# Resultado: 25 passed, 1 skipped (Open3D não instalado)
+```
+
 | Classe | Testes | Componente |
 |---|---|---|
 | `TestAjustePlano` | 4 | SVD, normal unitária, equação do plano |
 | `TestGramSchmidt` | 2 | Ortogonalidade, exceção para paralelos |
 | `TestConstruirBase` | 3 | Ortonormalidade mútua dos 3 eixos |
-| `TestMatrizTransformacao` | 3 | Identidade, translação, z_mesa = 0 |
+| `TestMatrizTransformacao` | 3 | Identidade, translação, $z_{mesa} = 0$ |
 | `TestDeteccaoTabuleiro` | 2 | Imagem sem tabuleiro, tabuleiro 7×5 |
-| `TestProjecaoTsai` | 3 | Projeção pinhole, deslocamento |
+| `TestProjecaoTsai` | 3 | Projeção pinhole, deslocamento em $x$ |
 | `TestLeituraRGBD` | 1 | Importação condicional Open3D |
-| `TestMDEColoracao` | 6 | Vermelho/Azul/Verde, limites, mock |
+| `TestMDEColoracao` | 6 | Vermelho/Azul/Verde, limites, mock rampa |
 | `TestPipeline` | 2 | Integração completa Passos 1+2 |
-
-```bash
-python -m unittest test_motor_caixao -v
-# Resultado: 25 passed, 1 skipped (Open3D)
-```
-
----
-
-## Status do Projeto
-
-### Software (Pronto)
-
-- ✅ Máquina de estados `main.py` com 4 estados + transições via teclado
-- ✅ **Dual-window**: Projecao_Areia (AR feedback) + Gabarito_MDE (heatmap referência)
-- ✅ `KinectSensor` OOP com fallback automático Open3D → freenect → simulação (Kinect a 2,5 m)
-- ✅ Motor matemático completo (SVD, Gram-Schmidt, Afim 4×4, Tsai)
-- ✅ `AdaptadorMDE` com leitura GeoTIFF + fallback cosseno 2D + `gerar_imagem_visualizacao()`
-- ✅ Dimensões reais: caixa 1,5 m × 1,5 m × 0,3 m, Kinect a 2,5 m
-- ✅ Coloração MDE (Vermelho/Azul/Verde) por diferença de altitude
-- ✅ Projeção 3D → 2D via `cv2.projectPoints`
-- ✅ Tela cheia para projetor (`cv2.WINDOW_FULLSCREEN`)
-- ✅ 26 testes unitários automatizados
-- ✅ Documentação técnica completa para a banca
-- ✅ Type Hints + Docstrings NumPy/Sphinx em todo o código
-
-### Hardware / Físico (Pendente)
-
-- 🔄 Conexão USB do Kinect real
-- 🔄 Montagem e alinhamento do projetor
-- 🔄 Calibração física com tabuleiro de xadrez impresso
-- 🔄 Recebimento do arquivo GeoTIFF final da Cartografia
-- 🔄 Ajuste de tolerância empírica com areia real
 
 ---
 
