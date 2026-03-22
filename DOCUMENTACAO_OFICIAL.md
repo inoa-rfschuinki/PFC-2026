@@ -4,8 +4,8 @@
 
 | Campo | Valor |
 |---|---|
-| **Instituição** | Academia Militar das Agulhas Negras (AMAN) |
-| **Curso** | Engenharia de Computação & Engenharia Eletrônica |
+| **Instituição** | Instituto Militar de Engenharia (IME) |
+| **Curso** | Engenharia de Computação & Engenharia Eletrônica & Engenharia Cartográfica |
 | **Ano** | 2026 |
 | **Equipe** | Rafael Schuinki · Raquel Belchior |
 | **Repositório** | `raquelbelchior1/PFC-2026` — branch `main` |
