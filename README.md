@@ -6,8 +6,8 @@
 ![Testes](https://img.shields.io/badge/Testes_Unitários-26_passing-brightgreen)
 ![Licença](https://img.shields.io/badge/Licença-Acadêmica-lightgrey)
 
-**Projeto Final de Curso (PFC) — Engenharia de Computação & Engenharia Eletrônica**  
-**Academia Militar das Agulhas Negras (AMAN) — 2026**
+**Projeto Final de Curso (PFC) — Engenharia de Computação & Engenharia Eletrônica & Engenharia Cartográfica**  
+**Instituto Militar de Engenharia (IME) — 2026**
 
 ---
 
