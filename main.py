@@ -77,8 +77,8 @@ gera uma superfície sintética automaticamente."""
 RESOLUCAO_PROJETOR: tuple[int, int] = (640, 480)
 """``(largura, altura)`` em pixels da janela de projeção."""
 
-TOLERANCIA_COR: float = 5.0
-"""Tolerância (mm) para a classificação Vermelho/Azul/Verde."""
+TOLERANCIA_COR: float = 0.02
+"""Tolerância em metros (2 cm) para a classificação Vermelho/Azul/Verde."""
 
 LARGURA_MESA: float = 1.50
 """Dimensão X da caixa de areia em metros (1,5 m)."""
@@ -176,6 +176,10 @@ class DadosCalibracao:
 def _executar_calibracao(sensor: KinectSensor) -> DadosCalibracao:
     """Captura a nuvem atual e calcula plano + base + matriz T.
 
+    No modo simulação, os pontos já estão em coordenadas da mesa,
+    então T = identidade e os parâmetros de projeção são calculados
+    para mapear [0, 1.5] m × [0, 1.5] m → pixels da imagem.
+
     Parameters
     ----------
     sensor : KinectSensor
@@ -197,6 +201,34 @@ def _executar_calibracao(sensor: KinectSensor) -> DadosCalibracao:
     print("  CALIBRAÇÃO — Passos 1 e 2 (SVD + Gram-Schmidt)")
     print("=" * 50)
 
+    # ── Modo Simulação: pontos já em coordenadas da mesa ──
+    if sensor.esta_simulando:
+        dados.T = np.eye(4)
+        dados.normal = np.array([0.0, 0.0, 1.0])
+        dados.centroide = np.array([0.75, 0.75, 0.15])
+
+        # Projeção: mapear mesa [0, L] × [0, C] → pixels do projetor
+        largura, altura = RESOLUCAO_PROJETOR
+        d_cam = 10.0  # distância virtual da câmera (metros)
+        fx = largura * d_cam / LARGURA_MESA
+        fy = altura * d_cam / COMPRIMENTO_MESA
+        dados.camera_matrix = np.array([
+            [fx,  0.0, 0.0],
+            [0.0, fy,  0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        dados.dist_coeffs = np.zeros(5)
+        dados.rvec = np.zeros((3, 1))
+        dados.tvec = np.array([[0.0], [0.0], [d_cam]])
+
+        print("  Modo Simulação — calibração automática.")
+        print("  T = Identidade (pontos já em coordenadas da mesa).")
+        print(f"  Projeção: fx={fx:.1f}, fy={fy:.1f}, d={d_cam:.1f} m")
+        print("  ✓ Calibração concluída (simulação).")
+        print("=" * 50 + "\n")
+        return dados
+
+    # ── Modo Real: SVD + Gram-Schmidt ──
     pontos = sensor.capturar_nuvem()
     if pontos.shape[0] < 10:
         raise RuntimeError(

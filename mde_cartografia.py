@@ -188,19 +188,21 @@ class AdaptadorMDE:
     # ------------------------------------------------------------------ #
 
     def _gerar_superficie_sintetica(self, resolucao: int = 100) -> None:
-        """Gera uma superfície matemática cosseno 2D como fallback.
+        """Gera um Morro Gaussiano centralizado na mesa como fallback.
 
         A superfície produzida é:
 
         .. math::
 
-            z(x, y) = \\frac{h}{2} \\left(1 + \\cos\\!\\left(
-                \\frac{2\\pi\\,x}{L_x}\\right) \\cdot
-                \\cos\\!\\left(\\frac{2\\pi\\,y}{L_y}\\right)\\right)
+            z(x, y) = 0.3 \\cdot \\exp\\!\\left(
+                -\\frac{(x - 0.75)^2 + (y - 0.75)^2}{0.1}\\right)
 
-        Isso gera uma "colina" suave no centro da mesa que vai de 0 a
-        ``altura_max_areia``, ideal para demonstrar a coloração RGB
-        na apresentação da banca.
+        - Pico no centro (0.75, 0.75): Z = 0.30 m
+        - Bordas (0, 0) ou (1.5, 1.5): Z ≈ 0.00 m
+
+        Combinado com o mock do Kinect (plano a Z = 0.15 m), gera
+        as três cores: Vermelho nas bordas, Azul no centro, Verde
+        no anel intermediário.
 
         Parameters
         ----------
@@ -211,11 +213,12 @@ class AdaptadorMDE:
         self._eixo_y = np.linspace(0.0, self._comprimento_mesa, resolucao)
         xx, yy = np.meshgrid(self._eixo_x, self._eixo_y)
 
-        h = self._altura_max_areia
-        self._grade_normalizada = (h / 2.0) * (
-            1.0
-            + np.cos(2 * np.pi * xx / self._largura_mesa)
-            * np.cos(2 * np.pi * yy / self._comprimento_mesa)
+        h = self._altura_max_areia  # 0.30 m
+        cx = self._largura_mesa / 2.0       # 0.75 m
+        cy = self._comprimento_mesa / 2.0   # 0.75 m
+
+        self._grade_normalizada = h * np.exp(
+            -((xx - cx) ** 2 + (yy - cy) ** 2) / 0.1
         )
 
         if RegularGridInterpolator is not None:
@@ -231,8 +234,9 @@ class AdaptadorMDE:
         self._z_max_original = h
         self._carregado = True
         self._usando_sintetico = True
-        print(f"[MDE] Superfície sintética gerada: {resolucao}×{resolucao}")
-        print(f"[MDE] Z range: 0.000 m → {h:.3f} m")
+        print(f"[MDE] Morro Gaussiano sintético gerado: {resolucao}×{resolucao}")
+        print(f"[MDE] Pico em ({cx:.2f}, {cy:.2f}): Z = {h:.3f} m")
+        print(f"[MDE] Bordas: Z ≈ 0.000 m")
 
     # ------------------------------------------------------------------ #
     # Consulta pontual

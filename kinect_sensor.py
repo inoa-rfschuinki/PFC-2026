@@ -278,18 +278,38 @@ class KinectSensor:
     # ------------------------------------------------------------------
 
     def capturar_nuvem(self) -> np.ndarray:
-        """Retorna uma nuvem de pontos 3D ``(N, 3)`` em milímetros.
+        """Retorna uma nuvem de pontos 3D ``(N, 3)``.
 
-        Cada linha contém ``[u_pixel, v_pixel, profundidade_mm]``.
-        Pontos com profundidade zero são descartados.
+        No modo real, cada linha contém ``[u_pixel, v_pixel, profundidade_mm]``.
+        No modo simulação, retorna pontos já em coordenadas da mesa
+        ``[x_m, y_m, z_m]`` com um plano reto em Z = 0.15 m.
 
         Returns
         -------
         np.ndarray, shape (N, 3), dtype float64
-            Coordenadas ``[u, v, d]`` dos pontos válidos.
         """
+        if self.modo == ModoSensor.SIMULACAO:
+            return self._nuvem_simulada_mesa()
         profundidade = self.capturar_profundidade()
         return self.profundidade_para_pontos(profundidade)
+
+    def _nuvem_simulada_mesa(self) -> np.ndarray:
+        """Gera nuvem de pontos simulada já em coordenadas da mesa.
+
+        Plano reto em Z = 0.15 m (metade da altura da caixa),
+        simulando areia perfeitamente nivelada a 15 cm.
+        Grid de 50×50 pontos cobrindo X ∈ [0, 1.5] e Y ∈ [0, 1.5].
+
+        Returns
+        -------
+        np.ndarray, shape (2500, 3), dtype float64
+        """
+        res = 50
+        xs = np.linspace(0.0, 1.5, res)
+        ys = np.linspace(0.0, 1.5, res)
+        xx, yy = np.meshgrid(xs, ys)
+        zz = np.full_like(xx, 0.15)
+        return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
 
     @staticmethod
     def profundidade_para_pontos(profundidade: np.ndarray) -> np.ndarray:

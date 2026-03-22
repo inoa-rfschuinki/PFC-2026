@@ -418,23 +418,23 @@ def ler_mde_placeholder(x: float, y: float) -> float:
 def cor_por_diferenca(
     z_real: float,
     z_mde: float,
-    tolerancia: float = 5.0,
+    tolerancia: float = 0.02,
 ) -> Cor:
     """Retorna a cor (BGR) de feedback conforme a diferença de alturas.
 
-    Regra do orientador:
+    Regra:
       - z_real > z_mde + tolerância  →  Vermelho  (precisa cavar)
-      - z_real < z_mde - tolerância  →  Azul      (precisa colocar areia)
+      - z_real < z_mde - tolerância  →  Azul      (precisa preencher)
       - caso contrário               →  Verde     (OK)
 
     Parameters
     ----------
     z_real : float
-        Altura medida pelo Kinect (referencial da mesa).
+        Altura medida pelo Kinect (referencial da mesa), em metros.
     z_mde : float
-        Altura esperada pelo MDE.
+        Altura esperada pelo MDE, em metros.
     tolerancia : float
-        Faixa de aceitação em torno de z_mde.
+        Faixa de aceitação em metros (padrão: 0.02 m = 2 cm).
 
     Returns
     -------
@@ -456,18 +456,18 @@ def cor_por_diferenca(
 def gerar_mapa_cores(
     pontos_mesa: np.ndarray,
     funcao_mde: Callable[[float, float], float] = ler_mde_placeholder,
-    tolerancia: float = 5.0,
+    tolerancia: float = 0.02,
 ) -> np.ndarray:
     """Gera um array de cores (N, 3) BGR comparando Kinect vs MDE.
 
     Parameters
     ----------
     pontos_mesa : np.ndarray, shape (N, 3)
-        Pontos já no referencial da mesa (x, y, z).
+        Pontos já no referencial da mesa (x, y, z) em metros.
     funcao_mde : Callable[[float, float], float]
-        Função que recebe (x, y) e retorna z_esperado.
+        Função que recebe (x, y) e retorna z_esperado em metros.
     tolerancia : float
-        Tolerância usada na classificação de cores.
+        Tolerância em metros (padrão: 0.02 m = 2 cm).
 
     Returns
     -------
