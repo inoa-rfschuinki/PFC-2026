@@ -46,6 +46,9 @@ import time
 from enum import Enum, auto
 from typing import Optional
 
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
 import cv2
 import numpy as np
 
@@ -418,6 +421,200 @@ def _processar_frame_ar(
 
 
 # =====================================================================
+# GUI de Configuração Inicial (Tkinter)
+# =====================================================================
+
+def _abrir_gui_configuracao() -> Optional[dict]:
+    """Exibe janela Tkinter para o operador selecionar o mapa e confirmar
+    as dimensões da mesa antes de iniciar o pipeline AR.
+
+    Returns
+    -------
+    dict | None
+        Dicionário com ``caminho_geotiff``, ``largura_mesa``,
+        ``comprimento_mesa`` e ``altura_max_areia``.
+        ``None`` se o usuário fechou a janela sem iniciar.
+    """
+    resultado: dict = {}
+
+    root = tk.Tk()
+    root.title("Caixão de Areia — Configuração")
+    root.resizable(False, False)
+
+    # ── Variáveis de estado ──
+    var_caminho = tk.StringVar(value="")
+    var_largura = tk.StringVar(value="1.50")
+    var_comprimento = tk.StringVar(value="1.50")
+    var_altura = tk.StringVar(value="0.30")
+    var_demo = tk.BooleanVar(value=False)
+
+    # ── Título ──
+    tk.Label(
+        root,
+        text="Caixão de Areia — AR Sandbox",
+        font=("Segoe UI", 16, "bold"),
+    ).pack(pady=(18, 2))
+    tk.Label(
+        root,
+        text="PFC Engenharia de Computação — IME 2026",
+        font=("Segoe UI", 10),
+        fg="#555555",
+    ).pack(pady=(0, 15))
+
+    # ── Seção: Mapa Tático ──
+    frame_mapa = tk.LabelFrame(
+        root,
+        text="  Mapa Tático  ",
+        font=("Segoe UI", 11, "bold"),
+        padx=15,
+        pady=10,
+    )
+    frame_mapa.pack(padx=20, pady=(0, 5), fill="x")
+
+    lbl_caminho = tk.Label(
+        frame_mapa,
+        text="Nenhum arquivo selecionado",
+        font=("Segoe UI", 9),
+        fg="#999999",
+        wraplength=380,
+        anchor="w",
+        justify="left",
+    )
+
+    def selecionar_mapa():
+        caminho = filedialog.askopenfilename(
+            title="Selecionar Mapa Tático GeoTIFF",
+            filetypes=[
+                ("GeoTIFF", "*.tif *.tiff"),
+                ("Todos os arquivos", "*.*"),
+            ],
+        )
+        if caminho:
+            var_caminho.set(caminho)
+            lbl_caminho.config(text=caminho, fg="#1a1a1a")
+            if not var_demo.get():
+                btn_iniciar.config(state="normal")
+
+    btn_mapa = tk.Button(
+        frame_mapa,
+        text="Selecionar Mapa Tático (.TIF)",
+        command=selecionar_mapa,
+        font=("Segoe UI", 11),
+        padx=10,
+        pady=6,
+        cursor="hand2",
+    )
+    btn_mapa.pack(fill="x")
+    lbl_caminho.pack(fill="x", pady=(5, 5))
+
+    def ao_alternar_demo():
+        if var_demo.get():
+            btn_mapa.config(state="disabled")
+            lbl_caminho.config(
+                text="Modo demonstração — Morro Gaussiano sintético",
+                fg="#2e7d32",
+            )
+            btn_iniciar.config(state="normal")
+        else:
+            btn_mapa.config(state="normal")
+            if var_caminho.get():
+                lbl_caminho.config(text=var_caminho.get(), fg="#1a1a1a")
+                btn_iniciar.config(state="normal")
+            else:
+                lbl_caminho.config(
+                    text="Nenhum arquivo selecionado", fg="#999999",
+                )
+                btn_iniciar.config(state="disabled")
+
+    tk.Checkbutton(
+        frame_mapa,
+        text="Usar mapa de demonstração (sem arquivo .TIF)",
+        variable=var_demo,
+        command=ao_alternar_demo,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w")
+
+    # ── Seção: Dimensões da Mesa ──
+    frame_mesa = tk.LabelFrame(
+        root,
+        text="  Dimensões da Mesa (metros)  ",
+        font=("Segoe UI", 11, "bold"),
+        padx=15,
+        pady=10,
+    )
+    frame_mesa.pack(padx=20, pady=10, fill="x")
+
+    for i, (rotulo, var) in enumerate([
+        ("Largura (X):", var_largura),
+        ("Comprimento (Y):", var_comprimento),
+        ("Altura Máx. Areia (Z):", var_altura),
+    ]):
+        tk.Label(
+            frame_mesa, text=rotulo, font=("Segoe UI", 10),
+        ).grid(row=i, column=0, sticky="w", pady=4)
+        tk.Entry(
+            frame_mesa,
+            textvariable=var,
+            font=("Segoe UI", 10),
+            width=10,
+            justify="center",
+        ).grid(row=i, column=1, padx=(15, 0), pady=4)
+
+    # ── Botão INICIAR ──
+    def iniciar():
+        try:
+            largura = float(var_largura.get())
+            comprimento = float(var_comprimento.get())
+            altura = float(var_altura.get())
+        except ValueError:
+            messagebox.showerror(
+                "Valores Inválidos",
+                "As dimensões da mesa devem ser números decimais.\n"
+                "Exemplo: 1.50",
+            )
+            return
+        if largura <= 0 or comprimento <= 0 or altura <= 0:
+            messagebox.showerror(
+                "Valores Inválidos",
+                "Todas as dimensões devem ser maiores que zero.",
+            )
+            return
+
+        resultado["caminho_geotiff"] = (
+            "" if var_demo.get() else var_caminho.get()
+        )
+        resultado["largura_mesa"] = largura
+        resultado["comprimento_mesa"] = comprimento
+        resultado["altura_max_areia"] = altura
+        root.destroy()
+
+    btn_iniciar = tk.Button(
+        root,
+        text="INICIAR SIMULAÇÃO",
+        command=iniciar,
+        font=("Segoe UI", 14, "bold"),
+        padx=20,
+        pady=12,
+        state="disabled",
+        cursor="hand2",
+    )
+    btn_iniciar.pack(pady=(5, 20), padx=20, fill="x")
+
+    # ── Centralizar janela na tela ──
+    root.update_idletasks()
+    w = root.winfo_reqwidth()
+    h = root.winfo_reqheight()
+    x = (root.winfo_screenwidth() - w) // 2
+    y = (root.winfo_screenheight() - h) // 2
+    root.geometry(f"+{x}+{y}")
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.mainloop()
+
+    return resultado if resultado else None
+
+
+# =====================================================================
 # Loop principal — Máquina de Estados
 # =====================================================================
 
@@ -429,11 +626,23 @@ def main() -> None:
     possui fallback resiliente — o sistema nunca crasha por falta
     de hardware ou arquivo.
     """
+    # ── GUI de Configuração Inicial ──────────────────────────────
+    config = _abrir_gui_configuracao()
+    if config is None:
+        print("\n✓ Operação cancelada pelo usuário.")
+        sys.exit(0)
+
+    global CAMINHO_GEOTIFF, LARGURA_MESA, COMPRIMENTO_MESA, ALTURA_MAX_AREIA
+    CAMINHO_GEOTIFF = config["caminho_geotiff"]
+    LARGURA_MESA = config["largura_mesa"]
+    COMPRIMENTO_MESA = config["comprimento_mesa"]
+    ALTURA_MAX_AREIA = config["altura_max_areia"]
+
     print()
     print("╔══════════════════════════════════════════════════╗")
     print("║     CAIXÃO DE AREIA — AR Sandbox                ║")
     print("║     PFC Engenharia de Computação — AMAN 2026    ║")
-    print("║     Mesa: 1.5 m × 1.5 m × 0.3 m                ║")
+    print(f"║     Mesa: {LARGURA_MESA} m × {COMPRIMENTO_MESA} m × {ALTURA_MAX_AREIA} m")
     print("║     Kinect: 2.5 m de altura                     ║")
     print("╚══════════════════════════════════════════════════╝")
     print()
