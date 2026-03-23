@@ -13,60 +13,105 @@
 
 ## Visão Geral
 
-O **AR Sandbox** projeta, em tempo real, um mapa de cores sobre uma caixa de areia física de **1,5 m × 1,5 m** com até **30 cm de profundidade**. Um sensor **Microsoft Kinect** montado a **2,5 m de altura** captura a topografia da areia, o motor matemático compara cada ponto com um **Modelo Digital de Elevação (MDE)** de referência no formato **GeoTIFF**, e um projetor exibe o feedback visual diretamente na superfície:
+O **AR Sandbox** projeta, em tempo real, uma **grade contínua de quadrados coloridos** sobre uma caixa de areia física de **1,5 m × 1,5 m** com até **30 cm de profundidade**. Um sensor **Microsoft Kinect** montado a **2,5 m de altura** captura a topografia da areia, o motor matemático discretiza a mesa em uma **malha de 30 × 30 células** (5 cm × 5 cm cada), calcula a **altura média** por célula, compara com um **Modelo Digital de Elevação (MDE)** de referência no formato **GeoTIFF**, e projeta o feedback visual diretamente na superfície como polígonos preenchidos:
 
 | Cor | Condição | Significado |
 |---|---|---|
-| 🔴 **Vermelho** | $Z_{real} > Z_{MDE} + 0{,}02\text{ m}$ | Areia em excesso — **Cavar** |
-| 🔵 **Azul** | $Z_{real} < Z_{MDE} - 0{,}02\text{ m}$ | Areia insuficiente — **Preencher** |
+| 🔴 **Vermelho** | $Z_{real\_media} > Z_{MDE} + 0{,}02\text{ m}$ | Areia em excesso — **Cavar** |
+| 🔵 **Azul** | $Z_{real\_media} < Z_{MDE} - 0{,}02\text{ m}$ | Areia insuficiente — **Preencher** |
 | 🟢 **Verde** | Diferença $\leq 0{,}02\text{ m}$ | Dentro da tolerância — **OK** |
 
 O sistema exibe **duas janelas simultâneas**:
 
 | Janela | Conteúdo |
 |---|---|
-| **Projecao_Areia** | Feedback AR em tempo real (vermelho/azul/verde) — enviada ao projetor |
+| **Projecao_Areia** | Grade contínua de quadrados coloridos (vermelho/azul/verde) — enviada ao projetor |
 | **Gabarito_MDE** | Heatmap de referência do MDE sendo replicado — monitor do operador |
 
 ### Resiliência Total — Zero Crash na Apresentação
 
 O sistema é **100% Plug & Play**: funciona em qualquer máquina, com ou sem hardware.
 
-- **Sem Kinect?** → O `KinectSensor` gera automaticamente uma nuvem de pontos simulando areia nivelada a **15 cm** (plano reto no grid $[0, 1.5] \times [0, 1.5]$ m).
+- **Sem Kinect?** → O `KinectSensor` entra em **Modo Simulação Interativo** com uma grade persistente de alturas inicializada em **15 cm**. O usuário pode **cavar** e **preencher** a areia virtual usando o **mouse** (veja seção abaixo).
 - **Sem GeoTIFF?** → O `AdaptadorMDE` gera automaticamente um **Morro Gaussiano** no centro da mesa (pico de 30 cm caindo para 0 nas bordas).
-- **Resultado da Simulação** → As **três cores** convivem na mesma imagem: bordas vermelhas, anel intermediário verde e centro azul.
+- **Resultado da Simulação** → As **três cores** convivem na mesma imagem: bordas vermelhas, anel intermediário verde e centro azul — e **reagem em tempo real** à interação do mouse.
+
+---
+
+## Simulador Interativo — "Pá Virtual" com o Mouse
+
+Na ausência de hardware físico (Kinect + areia), o sistema oferece um **emulador interativo completo** que permite demonstrar todo o pipeline AR usando apenas mouse e teclado.
+
+### Como funciona
+
+O `KinectSensor` em modo simulação mantém uma **matriz de alturas persistente** (grid 50×50) na memória, representando o estado atual da areia virtual. Eventos de mouse na janela **Projecao_Areia** modificam essa matriz em tempo real:
+
+| Ação do Mouse | Efeito na Areia | Analogia Física |
+|---|---|---|
+| **Botão Esquerdo** + Arrastar | **Diminui** $Z_{real}$ — cava a areia | Pá escavando |
+| **Botão Direito** + Arrastar | **Aumenta** $Z_{real}$ — preenche a areia | Balde despejando |
+
+- O efeito é **acumulativo**: quanto mais tempo o mouse permanece sobre um ponto, maior a alteração de altura.
+- A modificação usa um **perfil Gaussiano** com raio de 10 cm, garantindo bordas suaves e naturais (sem buracos quadrados).
+- A altura é limitada ao intervalo físico $[0{,}00 \text{ m},\; 0{,}30 \text{ m}]$.
+- A grade de quadrados coloridos **reage instantaneamente** na tela: ao cavar uma região verde, ela se torna azul; ao preencher uma vermelha, ela se torna verde.
+
+### Exemplo de interação
+
+1. Ao iniciar, toda a areia está a $Z = 0{,}15$ m (nivelada).
+2. O MDE alvo (Morro Gaussiano) pede $Z = 0{,}30$ m no centro e $Z \approx 0$ nas bordas.
+3. Resultado inicial: centro **azul** (falta areia), bordas **vermelhas** (excesso), anel intermediário **verde**.
+4. O operador **arrasta o botão direito no centro** → a areia sobe → quadrados azuis se tornam verdes.
+5. O operador **arrasta o botão esquerdo nas bordas** → a areia desce → quadrados vermelhos se tornam verdes.
+6. **Objetivo**: tornar toda a grade verde — o terreno virtual replica o MDE.
+
+---
+
+## Renderização — Malha Discretizada de Quadrados
+
+O sistema **não** projeta pontos isolados. A mesa é dividida em uma **grade contínua de células** (por padrão 30 × 30 = 900 quadrados de 5 cm × 5 cm), e cada célula é renderizada como um **polígono preenchido** usando `cv2.fillPoly`:
+
+1. **Discretização** — Os pontos da nuvem do Kinect são agrupados por célula e a altura $Z$ é **calculada como média** espacial, filtrando ruído do sensor.
+2. **Comparação** — A altura alvo $Z_{MDE}$ é consultada no **centro geométrico** de cada célula.
+3. **Projeção geométrica** — Os vértices da grade inteira (31 × 31 = 961 pontos) são projetados de uma só vez via `cv2.projectPoints` (modelo Tsai).
+4. **Rasterização** — Cada célula é desenhada como polígono de 4 cantos com `cv2.fillPoly`, resultando em cobertura contínua sem buracos.
+
+O resultado é uma **projeção sólida e limpa** sobre a areia — como "curvas de nível discretizadas".
 
 ---
 
 ## Arquitetura — 3 Camadas
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    main.py                              │
-│            Máquina de Estados (Orquestrador)            │
-│  INIT → IDLE → CALIBRACAO → AR_LOOP → (loop contínuo)  │
-│                                                         │
-│  Janelas:  Projecao_Areia ← AR feedback (projetor)     │
-│            Gabarito_MDE   ← Heatmap referência (monitor)│
-└───────────┬──────────────┬──────────────┬───────────────┘
-            │              │              │
-   ┌────────▼────────┐ ┌──▼───────────┐ ┌▼──────────────┐
-   │ kinect_sensor.py │ │motor_caixao_ │ │mde_cartografia│
-   │ KinectSensor     │ │ areia.py     │ │   .py         │
-   │ (OOP + Fallback) │ │ (Álgebra     │ │ AdaptadorMDE  │
-   │                  │ │  Linear)     │ │ (GeoTIFF +    │
-   │ Open3D/freenect  │ │ SVD, Gram-   │ │  Fallback     │
-   │ → Simulação auto │ │ Schmidt,     │ │  Gaussiano +  │
-   │ Kinect a 2.5 m   │ │ Tsai         │ │  Heatmap)     │
-   └──────────────────┘ └──────────────┘ └───────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                          main.py                               │
+│               Máquina de Estados (Orquestrador)                │
+│  INIT → IDLE → CALIBRACAO → AR_LOOP → (loop contínuo)         │
+│                                                                │
+│  Janelas:  Projecao_Areia ← Grade de quadrados AR (projetor)  │
+│            Gabarito_MDE   ← Heatmap referência (monitor)       │
+│  Mouse:    Botão Esq → cavar | Botão Dir → preencher          │
+└────────┬──────────────┬──────────────┬─────────────────────────┘
+         │              │              │
+┌────────▼────────┐ ┌──▼───────────┐ ┌▼──────────────┐
+│ kinect_sensor.py │ │motor_caixao_ │ │mde_cartografia│
+│ KinectSensor     │ │ areia.py     │ │   .py         │
+│ (OOP + Fallback  │ │ (Álgebra     │ │ AdaptadorMDE  │
+│  + Grade Persist.│ │  Linear +    │ │ (GeoTIFF +    │
+│  + modificar_    │ │  Discretiz.) │ │  Fallback     │
+│  areia())        │ │ SVD, Gram-   │ │  Gaussiano +  │
+│                  │ │ Schmidt,     │ │  Heatmap)     │
+│ Open3D/freenect  │ │ Tsai, Grade  │ │               │
+│ → Simulação auto │ │ fillPoly     │ │               │
+└──────────────────┘ └──────────────┘ └───────────────┘
 ```
 
 | Camada | Módulo | Responsabilidade |
 |---|---|---|
-| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: Open3D → freenect → simulação automática (plano a 15 cm) |
-| **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai, coloração |
+| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: Open3D → freenect → simulação com **grade persistente** + `modificar_areia()` |
+| **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai, **discretização em grade**, coloração por célula, `fillPoly` |
 | **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF via rasterio → fallback Morro Gaussiano + heatmap |
-| **Orquestração** | `main.py` | Máquina de estados (INIT/IDLE/CALIBRACAO/AR_LOOP), dual-window |
+| **Orquestração** | `main.py` | Máquina de estados, dual-window, **mouse callback** (`cv2.setMouseCallback`) |
 
 ---
 
@@ -74,9 +119,9 @@ O sistema é **100% Plug & Play**: funciona em qualquer máquina, com ou sem har
 
 ```
 PFC-2026/
-├── main.py                    # Máquina de Estados — ponto de entrada
-├── kinect_sensor.py           # KinectSensor OOP com fallback simulação
-├── motor_caixao_areia.py      # Motor matemático (SVD, Gram-Schmidt, Tsai)
+├── main.py                    # Máquina de Estados + Mouse Callback — ponto de entrada
+├── kinect_sensor.py           # KinectSensor OOP com grade persistente + modificar_areia()
+├── motor_caixao_areia.py      # Motor matemático (SVD, Gram-Schmidt, Tsai, Grade Discretizada)
 ├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback Gaussiano + heatmap
 │
 ├── test_motor_caixao.py       # 26 testes unitários automatizados
@@ -110,13 +155,13 @@ pip install pytest   # opcional, unittest funciona nativamente
 
 ## Como Executar
 
-### Modo Simulação (sem hardware — padrão automático)
+### Modo Simulação Interativo (sem hardware — padrão automático)
 
 ```bash
 python main.py
 ```
 
-Se nenhum Kinect estiver conectado e nenhum GeoTIFF estiver presente, o sistema entra **automaticamente** em modo simulação completo. Nenhuma configuração necessária.
+Se nenhum Kinect estiver conectado e nenhum GeoTIFF estiver presente, o sistema entra **automaticamente** em modo simulação interativo. Nenhuma configuração necessária — basta usar o mouse para interagir.
 
 Para forçar o modo simulação mesmo com Kinect conectado, edite no topo de `main.py`:
 
@@ -148,18 +193,24 @@ O `KinectSensor` detecta automaticamente:
 ### Configuração (topo de `main.py`)
 
 ```python
-CAMINHO_GEOTIFF   = "terreno_aman.tif"    # Arquivo MDE da Cartografia
-TOLERANCIA_COR    = 0.02                  # metros (2 cm)
-LARGURA_MESA      = 1.50                  # metros
-COMPRIMENTO_MESA  = 1.50                  # metros
-ALTURA_MAX_AREIA  = 0.30                  # metros (30 cm)
-ALTURA_KINECT     = 2.50                  # metros
-FORCAR_SIMULACAO  = False                 # True para ignorar Kinect
+CAMINHO_GEOTIFF      = "25S51_ZN.tif"    # Arquivo MDE (GeoTIFF)
+TOLERANCIA_COR       = 0.02              # metros (2 cm)
+LARGURA_MESA         = 1.50              # metros
+COMPRIMENTO_MESA     = 1.50              # metros
+ALTURA_MAX_AREIA     = 0.30              # metros (30 cm)
+ALTURA_KINECT        = 2.50              # metros
+CELULAS_GRADE_X      = 30                # colunas da malha (5 cm cada)
+CELULAS_GRADE_Y      = 30                # linhas da malha (5 cm cada)
+RAIO_PA_VIRTUAL      = 0.10              # raio do pincel do mouse (10 cm)
+INTENSIDADE_PA_VIRTUAL = 0.008           # deslocamento por evento (8 mm)
+FORCAR_SIMULACAO     = False             # True para ignorar Kinect
 ```
 
 ---
 
 ## Operação do Sistema
+
+### Teclado
 
 | Tecla | Ação |
 |---|---|
@@ -167,13 +218,31 @@ FORCAR_SIMULACAO  = False                 # True para ignorar Kinect
 | **F** | Toggle tela cheia na janela Projecao_Areia |
 | **Q** / **ESC** | Encerrar |
 
-### Fluxo de Demonstração para a Banca
+### Mouse (Simulação Interativa)
 
-1. Execute `python main.py` — abrem duas janelas: **Projecao_Areia** e **Gabarito_MDE**.
-2. Pressione **C** — a calibração SVD + Gram-Schmidt executa instantaneamente.
-3. A projeção AR inicia no **AR_LOOP**: as três cores (vermelho/azul/verde) aparecem na janela de projeção.
-4. O **Gabarito_MDE** exibe o heatmap do Morro Gaussiano de referência.
-5. Pressione **F** para tela cheia (projetor) ou **Q** para encerrar.
+| Ação | Efeito |
+|---|---|
+| **Botão Esquerdo + Arrastar** | Cavar areia (diminui $Z_{real}$) |
+| **Botão Direito + Arrastar** | Preencher areia (aumenta $Z_{real}$) |
+
+---
+
+## Roteiro de Demonstração para a Banca
+
+| Passo | Ação | Resultado esperado |
+|---|---|---|
+| 1 | `python main.py` | Duas janelas abrem: **Projecao_Areia** e **Gabarito_MDE** |
+| 2 | Pressionar **C** | Calibração automática (modo simulação) ou SVD (modo real) |
+| 3 | Observar **Projecao_Areia** | Grade contínua de quadrados coloridos: bordas vermelhas, anel verde, centro azul |
+| 4 | Observar **Gabarito_MDE** | Heatmap do Morro Gaussiano (ou GeoTIFF real) como referência |
+| 5 | **Arrastar botão direito** no centro azul | Quadrados mudam de azul → verde (areia subindo até o alvo) |
+| 6 | **Arrastar botão esquerdo** nas bordas vermelhas | Quadrados mudam de vermelho → verde (areia descendo até o alvo) |
+| 7 | Continuar interagindo | Objetivo: tornar **toda a grade verde** — terreno virtual replica o MDE |
+| 8 | Pressionar **F** | Tela cheia na janela de projeção (para projetor real) |
+| 9 | Pressionar **C** | Recalibração (demonstra robustez do pipeline) |
+| 10 | Pressionar **Q** | Encerramento limpo |
+
+> **Dica para a banca:** a interação com o mouse demonstra em tempo real todo o pipeline matemático (discretização → média espacial → comparação MDE → projeção Tsai → renderização) sem necessidade de hardware físico.
 
 ---
 

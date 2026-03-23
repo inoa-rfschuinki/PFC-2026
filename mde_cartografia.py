@@ -26,6 +26,9 @@ Uso típico::
 from __future__ import annotations
 
 import os
+import traceback
+from pathlib import Path
+
 import numpy as np
 from typing import Optional, Tuple
 
@@ -96,11 +99,38 @@ class AdaptadorMDE:
 
         # Tentar carregar o GeoTIFF; se falhar, gerar superfície sintética
         if caminho_geotiff:
+            # Resolver caminho relativo ao diretório do próprio script
+            caminho_resolvido = Path(caminho_geotiff)
+            if not caminho_resolvido.is_absolute():
+                diretorio_script = Path(__file__).resolve().parent
+                caminho_resolvido = diretorio_script / caminho_geotiff
+
             try:
-                self._carregar(caminho_geotiff)
-            except (ImportError, FileNotFoundError, Exception) as e:
-                print(f"[MDE] ⚠ Falha ao carregar GeoTIFF: {e}")
-                print("[MDE]   Gerando superfície sintética para demonstração.")
+                self._carregar(str(caminho_resolvido))
+            except ImportError as e:
+                print("=" * 60)
+                print(f"[ERRO MDE] DEPENDÊNCIA AUSENTE!")
+                print(f"[ERRO MDE] Motivo: {e}")
+                print(f"[ERRO MDE] Instale com: pip install rasterio scipy")
+                print("=" * 60)
+                self._gerar_superficie_sintetica()
+            except FileNotFoundError as e:
+                print("=" * 60)
+                print(f"[ERRO MDE] ARQUIVO NÃO ENCONTRADO!")
+                print(f"[ERRO MDE] Caminho procurado: {caminho_resolvido}")
+                print(f"[ERRO MDE] Motivo: {e}")
+                print(f"[ERRO MDE] Verifique se o .tif está na pasta: {caminho_resolvido.parent}")
+                print("=" * 60)
+                self._gerar_superficie_sintetica()
+            except Exception as e:
+                print("=" * 60)
+                print(f"[ERRO MDE] FALHA INESPERADA AO LER GeoTIFF!")
+                print(f"[ERRO MDE] Tipo do erro: {type(e).__name__}")
+                print(f"[ERRO MDE] Motivo: {e}")
+                print(f"[ERRO MDE] Arquivo: {caminho_resolvido}")
+                print(f"[ERRO MDE] Traceback completo:")
+                traceback.print_exc()
+                print("=" * 60)
                 self._gerar_superficie_sintetica()
         else:
             print("[MDE] Nenhum caminho fornecido — usando superfície sintética.")
@@ -129,22 +159,39 @@ class AdaptadorMDE:
                 f"Arquivo GeoTIFF não encontrado: {caminho}"
             )
 
-        # 1. Leitura da primeira banda
+        # 1. Leitura da primeira banda — converter para float32
         with rasterio.open(caminho) as src:
-            elevacoes = src.read(1).astype(np.float64)  # (linhas, colunas)
-            self._resolucao_geotiff = src.res            # (res_x, res_y)
+            elevacoes = src.read(1).astype(np.float32)  # (linhas, colunas)
+            self._resolucao_geotiff = src.res             # (res_x, res_y)
             nodata = src.nodata
+            dtype_original = src.dtypes[0]
 
-        # Tratar pixels sem dado substituindo por NaN e depois pela mediana
+        print(f"[MDE] Banda lida: dtype original={dtype_original}, "
+              f"nodata={nodata}, shape={elevacoes.shape}")
+
+        # Tratar pixels sem dado: substituir pelo mínimo válido do terreno
+        mascara_valida = np.ones(elevacoes.shape, dtype=bool)
         if nodata is not None:
-            mascara_nodata = elevacoes == nodata
-            if mascara_nodata.any():
-                mediana = float(np.nanmedian(elevacoes[~mascara_nodata]))
-                elevacoes[mascara_nodata] = mediana
+            mascara_valida &= elevacoes != np.float32(nodata)
+        # Tratar também NaN/Inf residuais
+        mascara_valida &= np.isfinite(elevacoes)
+
+        if not mascara_valida.any():
+            raise ValueError(
+                "O GeoTIFF não contém nenhum pixel válido de elevação "
+                f"(nodata={nodata}, shape={elevacoes.shape})."
+            )
+
+        minimo_valido = float(np.min(elevacoes[mascara_valida]))
+        pixels_invalidos = int((~mascara_valida).sum())
+        if pixels_invalidos > 0:
+            elevacoes[~mascara_valida] = minimo_valido
+            print(f"[MDE] {pixels_invalidos} pixels nodata/NaN substituídos "
+                  f"pelo mínimo válido ({minimo_valido:.2f} m).")
 
         # 2. Normalização Z: [z_min, z_max] → [0, altura_max_areia]
-        self._z_min_original = float(np.nanmin(elevacoes))
-        self._z_max_original = float(np.nanmax(elevacoes))
+        self._z_min_original = float(np.min(elevacoes))
+        self._z_max_original = float(np.max(elevacoes))
 
         amplitude = self._z_max_original - self._z_min_original
         if amplitude < 1e-12:
@@ -174,14 +221,17 @@ class AdaptadorMDE:
         )
 
         self._carregado = True
-        print(f"[MDE Cartografia] GeoTIFF carregado: {caminho}")
-        print(f"[MDE Cartografia] Grade: {n_linhas}×{n_colunas}")
-        print(f"[MDE Cartografia] Elevação original: "
-              f"{self._z_min_original:.1f} m → {self._z_max_original:.1f} m")
-        print(f"[MDE Cartografia] Normalizado para: "
+        print("=" * 60)
+        print(f"[MDE] ✅ Mapa real carregado com sucesso!")
+        print(f"[MDE] Arquivo: {caminho}")
+        print(f"[MDE] Resolução: {n_colunas} por {n_linhas}")
+        print(f"[MDE] Altitude real variando de "
+              f"{self._z_min_original:.2f} a {self._z_max_original:.2f} metros.")
+        print(f"[MDE] Normalizado para: "
               f"0.000 m → {self._altura_max_areia:.3f} m")
-        print(f"[MDE Cartografia] Mesa: {self._largura_mesa:.2f} m × "
+        print(f"[MDE] Mesa: {self._largura_mesa:.2f} m × "
               f"{self._comprimento_mesa:.2f} m")
+        print("=" * 60)
 
     # ------------------------------------------------------------------ #
     # Superfície sintética (fallback)

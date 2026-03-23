@@ -60,6 +60,7 @@ from motor_caixao_areia import (
     projetar_pontos_tsai,
     encontrar_cantos_tabuleiro,
     calibrar_projetor,
+    gerar_imagem_grade_cores,
 )
 
 # ── Adaptador MDE ────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ from mde_cartografia import AdaptadorMDE
 # CONFIGURAÇÃO — edite aqui antes de rodar
 # =====================================================================
 
-CAMINHO_GEOTIFF: str = "terreno_aman.tif"
+CAMINHO_GEOTIFF: str = "25S51_ZN.tif"
 """Caminho para o GeoTIFF da Cartografia.  Se não existir, o sistema
 gera uma superfície sintética automaticamente."""
 
@@ -91,6 +92,20 @@ ALTURA_MAX_AREIA: float = 0.30
 
 ALTURA_KINECT: float = 2.50
 """Altura de montagem do Kinect acima da mesa, em metros."""
+
+CELULAS_GRADE_X: int = 30
+"""Número de colunas da grade de discretização (eixo X).
+Com a mesa de 1,5 m, 30 colunas geram quadrados de 5 cm × 5 cm."""
+
+CELULAS_GRADE_Y: int = 30
+"""Número de linhas da grade de discretização (eixo Y).
+Com a mesa de 1,5 m, 30 linhas geram quadrados de 5 cm × 5 cm."""
+
+RAIO_PA_VIRTUAL: float = 0.10
+"""Raio de ação da pá virtual (mouse) em metros (10 cm)."""
+
+INTENSIDADE_PA_VIRTUAL: float = 0.008
+"""Deslocamento de areia por evento de mouse no centro do pincel (8 mm)."""
 
 FORCAR_SIMULACAO: bool = False
 """Se ``True``, ignora o Kinect e usa nuvem sintética."""
@@ -167,6 +182,85 @@ class DadosCalibracao:
     def esta_calibrado(self) -> bool:
         """``True`` se a calibração da mesa (Passos 1+2) foi concluída."""
         return self.T is not None
+
+
+# =====================================================================
+# Callback do Mouse — "Pá Virtual" para simulação interativa
+# =====================================================================
+
+# Estado global do mouse (necessário para o callback do OpenCV)
+_mouse_botao_esquerdo: bool = False
+_mouse_botao_direito: bool = False
+_sensor_ref: Optional[KinectSensor] = None
+
+
+def _callback_mouse(evento: int, x_pixel: int, y_pixel: int,
+                    flags: int, param: None) -> None:
+    """Callback ``cv2.setMouseCallback`` para cavar/preencher areia.
+
+    Mapeia a coordenada do pixel do mouse para a coordenada física
+    da mesa (em metros) e chama ``sensor.modificar_areia()``.
+
+    - **Botão esquerdo** (segurar + arrastar): **cava** a areia
+      (diminui Z) com decaimento Gaussiano.
+    - **Botão direito** (segurar + arrastar): **preenche** a areia
+      (aumenta Z) com decaimento Gaussiano.
+
+    O efeito é acumulativo: quanto mais tempo o mouse é arrastado
+    sobre um ponto, maior a alteração de altura.
+
+    Parameters
+    ----------
+    evento : int
+        Tipo de evento OpenCV (``cv2.EVENT_*``).
+    x_pixel, y_pixel : int
+        Coordenadas do mouse na janela, em pixels.
+    flags : int
+        Flags de estado (botões pressionados).
+    param : None
+        Dados do usuário (não utilizado).
+    """
+    global _mouse_botao_esquerdo, _mouse_botao_direito
+
+    if evento == cv2.EVENT_LBUTTONDOWN:
+        _mouse_botao_esquerdo = True
+    elif evento == cv2.EVENT_LBUTTONUP:
+        _mouse_botao_esquerdo = False
+    elif evento == cv2.EVENT_RBUTTONDOWN:
+        _mouse_botao_direito = True
+    elif evento == cv2.EVENT_RBUTTONUP:
+        _mouse_botao_direito = False
+
+    # Processar arraste (MOVE enquanto botão pressionado)
+    if not (_mouse_botao_esquerdo or _mouse_botao_direito):
+        return
+    if _sensor_ref is None or not _sensor_ref.esta_simulando:
+        return
+
+    # Obter tamanho real da janela (pode estar redimensionada)
+    try:
+        largura_janela = cv2.getWindowImageRect(JANELA_PROJECAO)[2]
+        altura_janela = cv2.getWindowImageRect(JANELA_PROJECAO)[3]
+    except cv2.error:
+        largura_janela, altura_janela = RESOLUCAO_PROJETOR
+
+    if largura_janela <= 0 or altura_janela <= 0:
+        return
+
+    # Ignorar cliques fora da área da imagem
+    if x_pixel < 0 or y_pixel < 0 or x_pixel >= largura_janela or y_pixel >= altura_janela:
+        return
+
+    # Mapear pixel → coordenada física da mesa (metros)
+    x_mesa = (x_pixel / largura_janela) * LARGURA_MESA
+    y_mesa = (y_pixel / altura_janela) * COMPRIMENTO_MESA
+
+    _sensor_ref.modificar_areia(
+        x_mesa, y_mesa,
+        cavar=_mouse_botao_esquerdo,
+        raio=RAIO_PA_VIRTUAL,
+        intensidade=INTENSIDADE_PA_VIRTUAL,
+    )
 
 
 # =====================================================================
@@ -258,14 +352,26 @@ def _processar_frame_ar(
     resolucao: tuple[int, int],
     tolerancia: float,
 ) -> np.ndarray:
-    """Processa um frame completo do pipeline AR.
+    """Processa um frame completo do pipeline AR com discretização em grade.
 
-    Pipeline por frame:
-        1. Captura nuvem 3D
-        2. Aplica T (Kinect → Mesa)
-        3. Consulta MDE → gera cores (R/G/B)
-        4. Projeta cores com Tsai → pixels 2D
-        5. Monta imagem BGR para o projetor
+    Em vez de colorir pontos individuais da nuvem do Kinect (abordagem
+    ruidosa e com buracos), a mesa é dividida em uma **malha regular**
+    de ``CELULAS_GRADE_Y × CELULAS_GRADE_X`` quadrados (por padrão
+    30 × 30 = 5 cm × 5 cm cada).
+
+    Pipeline por frame (abordagem de **grade**):
+
+    1. **Captura** — obtém a nuvem 3D do Kinect.
+    2. **Transformação** — aplica T (Kinect → Mesa) nos pontos.
+    3. **Discretização** — agrupa os pontos em células da grade e
+       calcula :math:`Z_{real\_media}` por célula (filtra ruído).
+    4. **Comparação MDE** — consulta :math:`Z_{MDE}` no centro de
+       cada célula e classifica a cor (Vermelho / Azul / Verde).
+    5. **Projeção Tsai** — projeta os vértices da grade em lote
+       via ``cv2.projectPoints``.
+    6. **Rasterização** — desenha cada célula como polígono
+       preenchido (``cv2.fillPoly``), gerando uma imagem contínua
+       sem buracos.
 
     Parameters
     ----------
@@ -275,12 +381,12 @@ def _processar_frame_ar(
     resolucao : tuple[int, int]
         ``(largura, altura)`` do projetor.
     tolerancia : float
-        Tolerância em mm para a classificação de cores.
+        Tolerância em metros para a classificação de cores.
 
     Returns
     -------
     np.ndarray, shape (H, W, 3), dtype uint8
-        Imagem BGR pronta para exibição.
+        Imagem BGR com grade contínua de quadrados coloridos.
     """
     largura, altura = resolucao
 
@@ -292,27 +398,21 @@ def _processar_frame_ar(
     # 2. Transformar Kinect → Mesa
     pontos_mesa = transformar_pontos(calibracao.T, pontos)
 
-    # 3. Comparar com MDE → cores BGR por ponto
-    cores = gerar_mapa_cores(
-        pontos_mesa,
+    # 3–6. Grade discretizada → imagem contínua de quadrados coloridos
+    imagem = gerar_imagem_grade_cores(
+        pontos_mesa=pontos_mesa,
         funcao_mde=mde.obter_z_alvo,
         tolerancia=tolerancia,
+        n_celulas_x=CELULAS_GRADE_X,
+        n_celulas_y=CELULAS_GRADE_Y,
+        largura_mesa=LARGURA_MESA,
+        comprimento_mesa=COMPRIMENTO_MESA,
+        rvec=calibracao.rvec,
+        tvec=calibracao.tvec,
+        camera_matrix=calibracao.camera_matrix,
+        dist_coeffs=calibracao.dist_coeffs,
+        resolucao=resolucao,
     )
-
-    # 4. Projetar 3D → 2D (Tsai / Pinhole)
-    pixels = projetar_pontos_tsai(
-        pontos_mesa,
-        calibracao.rvec,
-        calibracao.tvec,
-        calibracao.camera_matrix,
-        calibracao.dist_coeffs,
-    )
-
-    # 5. Montar imagem de saída
-    imagem = np.zeros((altura, largura, 3), dtype=np.uint8)
-    u = np.clip(pixels[:, 0].astype(int), 0, largura - 1)
-    v = np.clip(pixels[:, 1].astype(int), 0, altura - 1)
-    imagem[v, u] = cores
 
     return imagem
 
@@ -345,6 +445,8 @@ def main() -> None:
     imagem_gabarito: Optional[np.ndarray] = None
     t_anterior = time.time()
 
+    global _sensor_ref  # necessário para o callback do mouse
+
     while estado != Estado.ENCERRAR:
 
         # ── INIT ──────────────────────────────────────────
@@ -353,7 +455,12 @@ def main() -> None:
 
             # Hardware (com fallback automático)
             try:
-                sensor = KinectSensor(forcar_simulacao=FORCAR_SIMULACAO)
+                sensor = KinectSensor(
+                    forcar_simulacao=FORCAR_SIMULACAO,
+                    largura_mesa=LARGURA_MESA,
+                    comprimento_mesa=COMPRIMENTO_MESA,
+                    altura_max_areia=ALTURA_MAX_AREIA,
+                )
             except Exception as e:
                 logger.error("Falha crítica ao criar KinectSensor: %s", e)
                 print(f"[ERRO FATAL] Não foi possível iniciar o sensor: {e}")
@@ -377,6 +484,10 @@ def main() -> None:
             cv2.namedWindow(JANELA_PROJECAO, cv2.WINDOW_NORMAL)
             cv2.namedWindow(JANELA_GABARITO, cv2.WINDOW_NORMAL)
 
+            # Registrar callback do mouse para simulação interativa
+            _sensor_ref = sensor
+            cv2.setMouseCallback(JANELA_PROJECAO, _callback_mouse)
+
             # Exibir heatmap do MDE imediatamente
             cv2.imshow(JANELA_GABARITO, imagem_gabarito)
 
@@ -389,6 +500,11 @@ def main() -> None:
             print("  [C] Calibrar plano da mesa (SVD + Gram-Schmidt)")
             print("  [F] Tela cheia ON/OFF (janela de projeção)")
             print("  [Q] ou [ESC] Encerrar")
+            if sensor.esta_simulando:
+                print()
+                print("  Pá Virtual (Simulação Interativa):")
+                print("  [Botão Esquerdo + Arrastar] Cavar areia")
+                print("  [Botão Direito  + Arrastar] Colocar areia")
             print()
             estado = Estado.IDLE
 

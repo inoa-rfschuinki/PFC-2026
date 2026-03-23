@@ -486,6 +486,196 @@ def gerar_mapa_cores(
 
 
 # ============================================================================
+# 7. DISCRETIZAÇÃO EM GRADE — Malha de quadrados coloridos
+# ============================================================================
+
+def discretizar_nuvem_em_grade(
+    pontos_mesa: np.ndarray,
+    n_celulas_x: int,
+    n_celulas_y: int,
+    largura_mesa: float,
+    comprimento_mesa: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Agrupa os pontos da nuvem em uma grade regular e calcula a altura média por célula.
+
+    A mesa é dividida em ``n_celulas_y × n_celulas_x`` quadrados iguais.
+    Para cada célula, acumula as alturas Z dos pontos cujas coordenadas
+    (X, Y) caem dentro dos limites da célula e retorna a média.
+
+    Isso substitui a abordagem ponto-a-ponto, filtrando o ruído do
+    Kinect ao agregar múltiplas leituras por célula.
+
+    Parameters
+    ----------
+    pontos_mesa : np.ndarray, shape (N, 3)
+        Nuvem de pontos no referencial da mesa (X, Y, Z) em metros.
+    n_celulas_x : int
+        Número de células (colunas) no eixo X.
+    n_celulas_y : int
+        Número de células (linhas) no eixo Y.
+    largura_mesa : float
+        Dimensão X da mesa em metros.
+    comprimento_mesa : float
+        Dimensão Y da mesa em metros.
+
+    Returns
+    -------
+    alturas : np.ndarray, shape (n_celulas_y, n_celulas_x), dtype float64
+        Altura Z média por célula.  ``NaN`` onde não há pontos.
+    contagens : np.ndarray, shape (n_celulas_y, n_celulas_x), dtype int32
+        Quantidade de pontos do Kinect que caíram em cada célula.
+    """
+    tam_celula_x = largura_mesa / n_celulas_x
+    tam_celula_y = comprimento_mesa / n_celulas_y
+
+    soma_z = np.zeros((n_celulas_y, n_celulas_x), dtype=np.float64)
+    contagens = np.zeros((n_celulas_y, n_celulas_x), dtype=np.int32)
+
+    x = pontos_mesa[:, 0]
+    y = pontos_mesa[:, 1]
+    z = pontos_mesa[:, 2]
+
+    # Índices de célula para cada ponto (clamp para limites da grade)
+    col = np.clip((x / tam_celula_x).astype(np.int32), 0, n_celulas_x - 1)
+    lin = np.clip((y / tam_celula_y).astype(np.int32), 0, n_celulas_y - 1)
+
+    # Acumulação vetorizada
+    np.add.at(soma_z, (lin, col), z)
+    np.add.at(contagens, (lin, col), 1)
+
+    alturas = np.full((n_celulas_y, n_celulas_x), np.nan, dtype=np.float64)
+    mascara = contagens > 0
+    alturas[mascara] = soma_z[mascara] / contagens[mascara]
+
+    return alturas, contagens
+
+
+def gerar_imagem_grade_cores(
+    pontos_mesa: np.ndarray,
+    funcao_mde: Callable[[float, float], float],
+    tolerancia: float,
+    n_celulas_x: int,
+    n_celulas_y: int,
+    largura_mesa: float,
+    comprimento_mesa: float,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    resolucao: Tuple[int, int],
+) -> np.ndarray:
+    """Gera a imagem AR usando discretização em malha de quadrados coloridos.
+
+    Pipeline completo por frame (abordagem de **grade**):
+
+    1. **Discretização** — agrupa a nuvem de pontos do Kinect em uma
+       grade regular de ``n_celulas_y × n_celulas_x`` células e calcula
+       a altura média :math:`Z_{real\_media}` por célula.
+    2. **Comparação com MDE** — para cada célula com dados, consulta
+       ``funcao_mde(x_centro, y_centro)`` para obter :math:`Z_{MDE}` e
+       aplica a classificação de cores (Vermelho / Azul / Verde).
+    3. **Projeção Tsai** — projeta todos os vértices da grade (malha
+       de :math:`(N_y+1) \times (N_x+1)` pontos) de uma só vez via
+       ``cv2.projectPoints``, evitando chamadas repetidas.
+    4. **Rasterização** — desenha cada célula como um polígono
+       preenchido (``cv2.fillPoly``) com a cor correspondente,
+       garantindo cobertura contínua sem buracos.
+
+    O resultado é uma grade contínua de quadrados coloridos — como
+    "curvas de nível discretizadas" — projetada sobre a areia.
+
+    Parameters
+    ----------
+    pontos_mesa : np.ndarray, shape (N, 3)
+        Nuvem de pontos no referencial da mesa (X, Y, Z) em metros.
+    funcao_mde : Callable[[float, float], float]
+        Função que recebe (x, y) e retorna a altura alvo Z_mde.
+    tolerancia : float
+        Tolerância em metros para classificação de cores.
+    n_celulas_x : int
+        Número de colunas da grade.
+    n_celulas_y : int
+        Número de linhas da grade.
+    largura_mesa : float
+        Dimensão X da mesa em metros.
+    comprimento_mesa : float
+        Dimensão Y da mesa em metros.
+    rvec : np.ndarray
+        Vetor de Rodrigues (rotação extrínseca → projetor).
+    tvec : np.ndarray
+        Translação extrínseca → projetor.
+    camera_matrix : np.ndarray
+        Matriz intrínseca do projetor (3×3).
+    dist_coeffs : np.ndarray
+        Coeficientes de distorção.
+    resolucao : tuple[int, int]
+        ``(largura, altura)`` em pixels da imagem de saída.
+
+    Returns
+    -------
+    np.ndarray, shape (altura, largura, 3), dtype uint8
+        Imagem BGR com a grade de quadrados coloridos.
+    """
+    largura_img, altura_img = resolucao
+    imagem = np.zeros((altura_img, largura_img, 3), dtype=np.uint8)
+
+    if pontos_mesa.shape[0] == 0:
+        return imagem
+
+    # ── 1. Discretização: agrupar pontos em células ──
+    alturas, contagens = discretizar_nuvem_em_grade(
+        pontos_mesa, n_celulas_x, n_celulas_y,
+        largura_mesa, comprimento_mesa,
+    )
+
+    tam_celula_x = largura_mesa / n_celulas_x
+    tam_celula_y = comprimento_mesa / n_celulas_y
+
+    # ── 2. Projeção em lote dos vértices da grade ──
+    # A grade tem (n_celulas_y + 1) × (n_celulas_x + 1) vértices.
+    xs = np.linspace(0.0, largura_mesa, n_celulas_x + 1)
+    ys = np.linspace(0.0, comprimento_mesa, n_celulas_y + 1)
+    xx, yy = np.meshgrid(xs, ys)
+    vertices_3d = np.column_stack([
+        xx.ravel(), yy.ravel(), np.zeros(xx.size)
+    ])  # (V, 3) com Z = 0 (plano da mesa)
+
+    vertices_2d = projetar_pontos_tsai(
+        vertices_3d, rvec, tvec, camera_matrix, dist_coeffs,
+    )  # (V, 2)
+    vertices_2d = vertices_2d.reshape(
+        n_celulas_y + 1, n_celulas_x + 1, 2
+    )  # indexável por [lin, col]
+
+    # ── 3. Coloração e rasterização por célula ──
+    for i in range(n_celulas_y):
+        for j in range(n_celulas_x):
+            if contagens[i, j] == 0:
+                continue  # sem dados do Kinect nesta célula
+
+            z_real_media = float(alturas[i, j])
+
+            # Centro da célula para consulta ao MDE
+            x_centro = (j + 0.5) * tam_celula_x
+            y_centro = (i + 0.5) * tam_celula_y
+            z_mde = funcao_mde(x_centro, y_centro)
+
+            cor = cor_por_diferenca(z_real_media, z_mde, tolerancia)
+
+            # 4 cantos da célula já projetados em 2D
+            pts = np.array([
+                vertices_2d[i,     j    ],
+                vertices_2d[i,     j + 1],
+                vertices_2d[i + 1, j + 1],
+                vertices_2d[i + 1, j    ],
+            ], dtype=np.int32).reshape((-1, 1, 2))
+
+            cv2.fillPoly(imagem, [pts], cor)
+
+    return imagem
+
+
+# ============================================================================
 # Pipeline completo — atalho de conveniência
 # ============================================================================
 

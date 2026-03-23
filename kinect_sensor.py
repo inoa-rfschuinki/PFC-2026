@@ -71,7 +71,13 @@ class KinectSensor:
        ou ``o3d.io.RealSenseSensor`` para Kinect v2 / Azure).
     2. Abrir o Kinect via **freenect** (Kinect v1 / libfreenect).
     3. Se ambos falharem, entrar em **Modo Simulação** gerando
-       nuvens sintéticas (colina gaussiana + ruído).
+       nuvens sintéticas com estado persistente de areia.
+
+    **Simulação Interativa**: em modo simulação, a classe mantém uma
+    grade NumPy de alturas (``_grade_areia``) que começa em 0.15 m
+    (areia nivelada). O método ``modificar_areia()`` permite cavar
+    ou preencher com decaimento Gaussiano, simulando interação
+    física via mouse.
 
     Parameters
     ----------
@@ -81,6 +87,15 @@ class KinectSensor:
     resolucao : tuple[int, int]
         ``(largura, altura)`` da imagem de profundidade.
         Padrão: ``(640, 480)`` (Kinect v1).
+    resolucao_grade_sim : int
+        Número de pontos por eixo na grade de simulação.
+        Padrão: 50 (gera 2500 pontos na nuvem).
+    largura_mesa : float
+        Dimensão X da mesa em metros (padrão: 1.50).
+    comprimento_mesa : float
+        Dimensão Y da mesa em metros (padrão: 1.50).
+    altura_max_areia : float
+        Altura máxima da areia em metros (padrão: 0.30).
 
     Attributes
     ----------
@@ -94,15 +109,32 @@ class KinectSensor:
     >>> sensor = KinectSensor()
     >>> nuvem = sensor.capturar_nuvem()       # (N, 3) float64
     >>> prof = sensor.capturar_profundidade()  # (480, 640) uint16
+    >>> sensor.modificar_areia(0.75, 0.75, cavar=True)  # cava no centro
     """
 
     def __init__(
         self,
         forcar_simulacao: bool = False,
         resolucao: Tuple[int, int] = (_KINECT_LARGURA, _KINECT_ALTURA),
+        resolucao_grade_sim: int = 50,
+        largura_mesa: float = 1.50,
+        comprimento_mesa: float = 1.50,
+        altura_max_areia: float = 0.30,
     ) -> None:
         self.resolucao: Tuple[int, int] = resolucao
         self.modo: ModoSensor = ModoSensor.SIMULACAO
+
+        # Dimensões da mesa (usadas na simulação interativa)
+        self._largura_mesa = largura_mesa
+        self._comprimento_mesa = comprimento_mesa
+        self._altura_max_areia = altura_max_areia
+        self._resolucao_grade_sim = resolucao_grade_sim
+
+        # Grade persistente de alturas da areia (modo simulação)
+        # Inicializada em 0.15 m = metade da altura máxima (0.30 m)
+        self._grade_areia: Optional[np.ndarray] = None
+        self._eixo_x_sim: Optional[np.ndarray] = None
+        self._eixo_y_sim: Optional[np.ndarray] = None
 
         # Referências para drivers reais (populadas se disponíveis)
         self._o3d_sensor = None
@@ -113,6 +145,7 @@ class KinectSensor:
                 "KinectSensor: forcar_simulacao=True — Modo Simulação ativado."
             )
             print("[KinectSensor] ⚠ Modo Simulação forçado pelo usuário.")
+            self._inicializar_grade_simulacao()
             return
 
         # --- Tentativa 1: Open3D ---
@@ -129,6 +162,7 @@ class KinectSensor:
         )
         print("[KinectSensor] ⚠ Aviso: Nenhum sensor Kinect detectado.")
         print("[KinectSensor]   Entrando em MODO SIMULAÇÃO (nuvem sintética).")
+        self._inicializar_grade_simulacao()
 
     # ------------------------------------------------------------------
     # Inicialização de drivers
@@ -293,23 +327,88 @@ class KinectSensor:
         profundidade = self.capturar_profundidade()
         return self.profundidade_para_pontos(profundidade)
 
-    def _nuvem_simulada_mesa(self) -> np.ndarray:
-        """Gera nuvem de pontos simulada já em coordenadas da mesa.
+    def _inicializar_grade_simulacao(self) -> None:
+        """Cria a grade persistente de alturas para o modo simulação.
 
-        Plano reto em Z = 0.15 m (metade da altura da caixa),
-        simulando areia perfeitamente nivelada a 15 cm.
-        Grid de 50×50 pontos cobrindo X ∈ [0, 1.5] e Y ∈ [0, 1.5].
+        A grade tem ``resolucao_grade_sim × resolucao_grade_sim`` pontos
+        cobrindo a mesa inteira, todos inicializados em 0.15 m
+        (metade da altura máxima de areia).
+        """
+        res = self._resolucao_grade_sim
+        self._eixo_x_sim = np.linspace(0.0, self._largura_mesa, res)
+        self._eixo_y_sim = np.linspace(0.0, self._comprimento_mesa, res)
+        self._grade_areia = np.full(
+            (res, res), self._altura_max_areia / 2.0, dtype=np.float64
+        )
+        print(f"[KinectSensor] Grade de simulação: {res}×{res}, "
+              f"Z inicial = {self._altura_max_areia / 2.0:.2f} m")
+
+    def modificar_areia(
+        self,
+        x: float,
+        y: float,
+        cavar: bool = True,
+        raio: float = 0.10,
+        intensidade: float = 0.008,
+    ) -> None:
+        """Cava ou preenche a areia virtual com decaimento Gaussiano.
+
+        Simula a interação física do usuário com a areia.  O efeito
+        é centrado em ``(x, y)`` com um perfil Gaussiano de largura
+        ``raio`` (em metros).  Chamadas repetidas (arrastar o mouse)
+        acumulam o efeito frame a frame.
+
+        Parameters
+        ----------
+        x : float
+            Coordenada X na mesa (metros).
+        y : float
+            Coordenada Y na mesa (metros).
+        cavar : bool
+            Se ``True``, diminui Z (cavar). Se ``False``, aumenta Z
+            (colocar areia).
+        raio : float
+            Raio de ação em metros (padrão: 0.10 m = 10 cm).
+        intensidade : float
+            Deslocamento máximo por chamada no centro do pincel
+            (padrão: 0.008 m ≈ 8 mm).
+        """
+        if self._grade_areia is None:
+            return
+
+        xx, yy = np.meshgrid(self._eixo_x_sim, self._eixo_y_sim)
+
+        # Distância ao centro do clique
+        dist2 = (xx - x) ** 2 + (yy - y) ** 2
+        sigma2 = (raio / 2.0) ** 2  # sigma = raio/2 → 95% do efeito dentro do raio
+
+        # Perfil Gaussiano
+        delta = intensidade * np.exp(-dist2 / (2.0 * sigma2))
+
+        if cavar:
+            self._grade_areia -= delta
+        else:
+            self._grade_areia += delta
+
+        # Limitar ao intervalo físico [0, altura_max_areia]
+        np.clip(self._grade_areia, 0.0, self._altura_max_areia, out=self._grade_areia)
+
+    def _nuvem_simulada_mesa(self) -> np.ndarray:
+        """Gera nuvem de pontos simulada a partir da grade persistente de areia.
+
+        Retorna a nuvem com as alturas atuais (potencialmente modificadas
+        por ``modificar_areia``), já em coordenadas da mesa.
 
         Returns
         -------
-        np.ndarray, shape (2500, 3), dtype float64
+        np.ndarray, shape (N, 3), dtype float64
         """
-        res = 50
-        xs = np.linspace(0.0, 1.5, res)
-        ys = np.linspace(0.0, 1.5, res)
-        xx, yy = np.meshgrid(xs, ys)
-        zz = np.full_like(xx, 0.15)
-        return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+        xx, yy = np.meshgrid(self._eixo_x_sim, self._eixo_y_sim)
+        return np.column_stack([
+            xx.ravel(),
+            yy.ravel(),
+            self._grade_areia.ravel(),
+        ])
 
     @staticmethod
     def profundidade_para_pontos(profundidade: np.ndarray) -> np.ndarray:
