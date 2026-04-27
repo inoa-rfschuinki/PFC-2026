@@ -14,9 +14,17 @@ Pipeline Matemático
    (``encontrar_cantos_tabuleiro``).
 4. **Projeção 3D → 2D** — Modelo de Tsai via ``cv2.projectPoints``
    (``projetar_pontos_tsai``, ``calibrar_projetor``).
+4b. **Calibração Coplanar** — Geração do padrão de xadrez para projeção
+    (``gerar_imagem_xadrez``) e orquestrador completo de 5 passos
+    (``calibrar_coplanar``) que resolve o problema de degeneração quando
+    a areia está quase plana, forçando Z_local = 0 nos objectPoints.
+    Inclui ``projetar_ponto_rgbd`` para uso no loop RGBD em tempo real.
 5. **Nuvem RGBD** — Conversão Open3D (``criar_nuvem_de_pontos_open3d``).
 6. **Coloração MDE** — Comparação Z_real vs Z_alvo com tolerância
    (``gerar_mapa_cores``).
+7. **Discretização em Grade** — Malha de quadrados coloridos preenchidos
+   com ``cv2.fillPoly`` (``discretizar_nuvem_em_grade``,
+   ``gerar_imagem_grade_cores``).
 """
 
 from __future__ import annotations
@@ -320,6 +328,319 @@ def calibrar_projetor(
         obj_pts, img_pts, tamanho_imagem, None, None
     )
     return camera_matrix, dist_coeffs, rvecs[0], tvecs[0]
+
+
+# ============================================================================
+# 4b. CALIBRAÇÃO COPLANAR — Gerador de Xadrez + Orchestrador (5 Passos)
+# ============================================================================
+
+def gerar_imagem_xadrez(
+    resolucao: Tuple[int, int],
+    tamanho_tabuleiro: Tuple[int, int] = (7, 5),
+    tamanho_quadrado: int = 60,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Gera o padrão de xadrez para projetar sobre a areia durante a calibração.
+
+    O tabuleiro é centralizado na imagem do projetor.  Os cantos internos são
+    as interseções entre quadrados pretos e brancos — são exatamente esses
+    pontos que ``cv2.findChessboardCorners`` detecta na imagem do Kinect.
+
+    O ordering dos cantos é o mesmo que o OpenCV usa:
+    esquerda → direita dentro de cada linha, linhas de cima → baixo.
+    Isso garante correspondência direta com os pixels retornados por
+    ``cv2.findChessboardCorners``.
+
+    Parameters
+    ----------
+    resolucao : (largura, altura)
+        Resolução do projetor em pixels.
+    tamanho_tabuleiro : (colunas, linhas)
+        Número de *cantos internos* do tabuleiro.  Ex: ``(7, 5)`` gera um
+        tabuleiro de 8×6 quadrados com 7×5 = 35 cantos internos.
+    tamanho_quadrado : int
+        Lado de cada quadrado em pixels.
+
+    Returns
+    -------
+    imagem : np.ndarray, shape (H, W, 3), dtype uint8
+        Imagem BGR do xadrez para exibir no projetor.
+    cantos_projetor : np.ndarray, shape (M, 2), dtype float32
+        Posições ``(u, v)`` dos cantos internos em pixels do projetor.
+        ``M = colunas × linhas``.
+    """
+    W, H = resolucao
+    cols, rows = tamanho_tabuleiro   # cantos internos
+    n_sq_x = cols + 1                # quadrados na direção X
+    n_sq_y = rows + 1                # quadrados na direção Y
+
+    img_gray = np.ones((H, W), dtype=np.uint8) * 255  # fundo branco
+
+    # Centralizar o tabuleiro na imagem
+    board_w = n_sq_x * tamanho_quadrado
+    board_h = n_sq_y * tamanho_quadrado
+    x0 = (W - board_w) // 2
+    y0 = (H - board_h) // 2
+
+    # Pintar quadrados onde (linha + coluna) é par → preto
+    for r in range(n_sq_y):
+        for c in range(n_sq_x):
+            if (r + c) % 2 == 0:
+                x1 = x0 + c * tamanho_quadrado
+                y1 = y0 + r * tamanho_quadrado
+                img_gray[y1:y1 + tamanho_quadrado, x1:x1 + tamanho_quadrado] = 0
+
+    # Calcular posições dos cantos internos em pixels do projetor.
+    # Canto interno (r, c) fica na interseção das linhas divisórias:
+    #   u = x0 + (c + 1) * tamanho_quadrado
+    #   v = y0 + (r + 1) * tamanho_quadrado
+    cantos: List[List[float]] = []
+    for r in range(rows):
+        for c in range(cols):
+            px = float(x0 + (c + 1) * tamanho_quadrado)
+            py = float(y0 + (r + 1) * tamanho_quadrado)
+            cantos.append([px, py])
+
+    cantos_arr = np.array(cantos, dtype=np.float32)  # (M, 2)
+    imagem_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+    return imagem_bgr, cantos_arr
+
+
+
+
+def calibrar_coplanar(
+    nuvem_areia: np.ndarray,
+    pontos_3d_grid_kinect: np.ndarray,
+    pontos_2d_grid_projetor: np.ndarray,
+    tamanho_imagem: Tuple[int, int],
+    semente: Optional[np.ndarray] = None,
+) -> Tuple[
+    np.ndarray,  # T          (4×4) — Kinect → Mesa
+    np.ndarray,  # camera_matrix (3×3)
+    np.ndarray,  # dist_coeffs
+    np.ndarray,  # rvec (3×1)
+    np.ndarray,  # tvec (3×1)
+    np.ndarray,  # normal (3,)
+    np.ndarray,  # centroide (3,)
+]:
+    """Calibração Coplanar completa em 5 passos.
+
+    Resolve o problema de configuração degenerada que ocorre quando a areia
+    está quase plana (variação Z ≈ ruído do sensor): ao invés de tentar
+    estimar uma transformação 3D não-coplanar mal-condicionada, aproveitamos
+    o fato de que a areia É plana para ajustar um plano e trabalhar com
+    ``Z_local = 0`` como superfície matemática estrita.
+
+    ─────────────────────────────────────────────────────────────────────────
+    Passo 1 — Ajuste de Plano por SVD (Mínimos Quadrados)
+    ─────────────────────────────────────────────────────────────────────────
+    Recebe a nuvem ruidosa (N, 3) e encontra o plano ótimo por SVD:
+
+        1. Centraliza: ``P̃ = P − centroide``
+        2. Decompõe: ``P̃ = U · S · Vᵀ``  (SVD economy)
+        3. Normal:   ``n = última linha de Vᵀ``  (vetor singular mínimo)
+
+    O menor valor singular ``σ_min`` representa a espessura da "laje"
+    de pontos em torno do plano — quanto menor, mais plana a areia.
+    A equação canônica do plano é ``n·p + d = 0``, com ``d = −n·centroide``.
+
+    ─────────────────────────────────────────────────────────────────────────
+    Passo 2 — Sistema de Coordenadas Local (Gram-Schmidt + Produto Vetorial)
+    ─────────────────────────────────────────────────────────────────────────
+    Constrói a base ortonormal da "mesa" a partir da normal ``n``:
+
+        Z_mesa = n / ‖n‖                         ← perpendicular à areia
+        X_mesa = GramSchmidt(semente, Z_mesa)    ← eixo no plano
+        Y_mesa = Z_mesa × X_mesa / ‖…‖           ← produto vetorial → ⊥ garantido
+
+    Gram-Schmidt aplicado à semente ``v`` em relação a ``ref``:
+        ``X_mesa = (v − (v·ref)·ref) / ‖v − (v·ref)·ref‖``
+
+    Monta a matriz afim 4×4:
+        ``T = [ R | t ]``,  ``R = [X_mesa; Y_mesa; Z_mesa]``,  ``t = −R·centroide``
+              ``[ 0 | 1 ]``
+
+    Após ``T``, qualquer ponto da superfície plana da areia satisfaz
+    estritamente ``Z_local = 0``.
+
+    ─────────────────────────────────────────────────────────────────────────
+    Passo 3 — Pontos do Grid no Referencial Local
+    ─────────────────────────────────────────────────────────────────────────
+    Aplica ``T`` aos ``M`` pontos 3D das interseções do grid (lidas pelo
+    Kinect). O resultado é ``(X_local, Y_local, Z_local)`` onde
+    ``Z_local ≈ 0`` (residual de ruído).
+
+    ─────────────────────────────────────────────────────────────────────────
+    Passo 4 — Tsai Coplanar via cv2.calibrateCamera
+    ─────────────────────────────────────────────────────────────────────────
+    Força ``Z_local = 0`` em todos os objectPoints antes de passar ao OpenCV:
+
+        ``obj_pts[i] = (X_local[i], Y_local[i], 0)``
+
+    Esta é a hipótese coplanar de Tsai. ``cv2.calibrateCamera`` usa DLT
+    seguido de refinamento Levenberg-Marquardt para estimar:
+
+        - **K** = ``[[fx, 0, cx], [0, fy, cy], [0, 0, 1]]``  (intrínseca)
+        - **dist** = ``(k1, k2, p1, p2, k3)``               (distorção)
+        - **rvec** (Rodrigues) e **tvec**                    (extrínseca)
+
+    O sistema é bem condicionado porque os pontos têm boa distribuição
+    em X e Y (o grid calibrador), e a hipótese Z=0 remove a degeneração.
+
+    ─────────────────────────────────────────────────────────────────────────
+    Passo 5 — Transição para Loop RGBD
+    ─────────────────────────────────────────────────────────────────────────
+    Retorna ``T, K, dist, rvec, tvec``. No loop em tempo real, para
+    projetar um novo ponto ``(X_real, Y_real, Z_real)`` do Kinect em
+    pixels ``(u, v)`` do projetor use :func:`projetar_ponto_rgbd`.
+
+    Parameters
+    ----------
+    nuvem_areia : np.ndarray, shape (N, 3)
+        Nuvem de pontos 3D do Kinect da areia quase plana (m).
+    pontos_3d_grid_kinect : np.ndarray, shape (M, 3)
+        Posições 3D (X, Y, Z) das interseções do grid calibrador,
+        lidas pelo Kinect (mesmo referencial de ``nuvem_areia``).
+    pontos_2d_grid_projetor : np.ndarray, shape (M, 2)
+        Coordenadas de pixel (u, v) correspondentes às interseções
+        do grid na imagem do projetor.
+    tamanho_imagem : (largura, altura)
+        Resolução do projetor em pixels, ex.: ``(1280, 720)``.
+    semente : np.ndarray | None
+        Vetor semente para a ortogonalização Gram-Schmidt.
+        Se ``None``, escolhe automaticamente (veja :func:`construir_base_mesa`).
+
+    Returns
+    -------
+    T : np.ndarray, shape (4, 4)
+        Matriz afim Kinect → Mesa.
+    camera_matrix : np.ndarray, shape (3, 3)
+        Parâmetros intrínsecos do projetor.
+    dist_coeffs : np.ndarray
+        Coeficientes de distorção.
+    rvec : np.ndarray, shape (3, 1)
+        Vetor de Rodrigues (rotação extrínseca Mesa → Projetor).
+    tvec : np.ndarray, shape (3, 1)
+        Translação extrínseca Mesa → Projetor.
+    normal : np.ndarray, shape (3,)
+        Vetor normal do plano ajustado (referencial Kinect).
+    centroide : np.ndarray, shape (3,)
+        Centroide da nuvem usada no ajuste de plano.
+
+    Raises
+    ------
+    ValueError
+        Se M < 4 (mínimo para cv2.calibrateCamera coplanar) ou se os
+        dois arrays de correspondência tiverem tamanhos incompatíveis.
+    """
+    M = pontos_3d_grid_kinect.shape[0]
+    if M < 4:
+        raise ValueError(
+            f"São necessários pelo menos 4 pontos de correspondência; recebidos: {M}."
+        )
+    if pontos_2d_grid_projetor.shape[0] != M:
+        raise ValueError(
+            "pontos_3d_grid_kinect e pontos_2d_grid_projetor devem ter o mesmo "
+            f"número de linhas (recebidos {M} e {pontos_2d_grid_projetor.shape[0]})."
+        )
+
+    # ── Passo 1: Ajuste de plano por SVD ──────────────────────────────────
+    # ajustar_plano_svd centraliza a nuvem, aplica SVD e extrai a normal
+    # como o vetor singular associado ao menor valor singular σ_min.
+    normal, d, centroide = ajustar_plano_svd(nuvem_areia)
+
+    # ── Passo 2: Base ortonormal da mesa (Gram-Schmidt + Produto Vetorial) ─
+    # Z_mesa = normal;  X_mesa via Gram-Schmidt;  Y_mesa = Z×X (cross product)
+    X_mesa, Y_mesa, Z_mesa = construir_base_mesa(normal, semente)
+    T = montar_matriz_transformacao(X_mesa, Y_mesa, Z_mesa, centroide)
+
+    # ── Passo 3: Transformar pontos do grid para o referencial local ───────
+    # Após T, a superfície plana da areia satisfaz Z_local ≈ 0.
+    grid_local = transformar_pontos(T, pontos_3d_grid_kinect)  # (M, 3)
+
+    # ── Passo 4: Tsai Coplanar — forçar Z_local = 0 (hipótese coplanar) ───
+    # Esta é a chave da calibração coplanar de Tsai: substituímos o Z residual
+    # (ruído do sensor) por 0 exato, tornando o sistema bem condicionado.
+    # cv2.calibrateCamera recebe uma *lista* de vistas; passamos apenas uma.
+    obj_pts_coplanar = np.column_stack([
+        grid_local[:, 0],                    # X_local (variação real XY do grid)
+        grid_local[:, 1],                    # Y_local (variação real XY do grid)
+        np.zeros(M, dtype=np.float64),       # Z_local = 0  ← hipótese coplanar
+    ]).astype(np.float32)                    # cv2 exige float32
+
+    img_pts = pontos_2d_grid_projetor.reshape(-1, 1, 2).astype(np.float32)
+
+    largura, altura = tamanho_imagem
+    _ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+        [obj_pts_coplanar],   # lista de objectPoints por vista
+        [img_pts],            # lista de imagePoints por vista
+        (largura, altura),    # resolução do projetor
+        None,                 # sem estimativa inicial de K
+        None,                 # sem estimativa inicial de distorção
+    )
+
+    # ── Passo 5: Retornar todos os parâmetros para o loop RGBD ────────────
+    return T, camera_matrix, dist_coeffs, rvecs[0], tvecs[0], normal, centroide
+
+
+def projetar_ponto_rgbd(
+    ponto_kinect: np.ndarray,
+    T: np.ndarray,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    camera_matrix: np.ndarray,
+    dist_coeffs: Optional[np.ndarray] = None,
+) -> Tuple[float, float]:
+    """Projeta um ponto 3D do Kinect em pixels do projetor (hot-path RGBD).
+
+    Encadeia os dois passos do loop em tempo real descrito no Passo 5 da
+    calibração coplanar:
+
+        **Passo A — Transformação de referencial:**
+            ``p_local = T @ [X_real, Y_real, Z_real, 1]ᵀ``
+
+            Leva o ponto do referencial do Kinect para o referencial da mesa.
+            Aqui, ``Z_local ≠ 0`` representa a topografia REAL da areia —
+            montanhas e vales esculpidos pelo usuário.
+
+        **Passo B — Projeção Tsai:**
+            ``(u, v) = projectPoints(p_local[:3], rvec, tvec, K, dist)``
+
+            Usa os parâmetros obtidos na calibração coplanar. O modelo de Tsai
+            lida corretamente com Z_local ≠ 0: o ponto saiu do plano de
+            calibração, mas a projeção perspectiva ainda é válida, pois
+            ``rvec``/``tvec``/``K`` descrevem a câmera completa em 3D.
+
+    Parameters
+    ----------
+    ponto_kinect : np.ndarray, shape (3,) ou (1, 3)
+        Ponto ``(X_real, Y_real, Z_real)`` no referencial do Kinect, em metros.
+    T : np.ndarray, shape (4, 4)
+        Matriz afim 4×4 retornada por :func:`calibrar_coplanar`.
+    rvec : np.ndarray, shape (3, 1)
+        Vetor de Rodrigues retornado por :func:`calibrar_coplanar`.
+    tvec : np.ndarray, shape (3, 1)
+        Translação extrínseca retornada por :func:`calibrar_coplanar`.
+    camera_matrix : np.ndarray, shape (3, 3)
+        Matriz intrínseca retornada por :func:`calibrar_coplanar`.
+    dist_coeffs : np.ndarray | None
+        Coeficientes de distorção. Se ``None``, assume distorção zero.
+
+    Returns
+    -------
+    u : float
+        Coluna do pixel no projetor.
+    v : float
+        Linha do pixel no projetor.
+    """
+    # Passo A: Kinect → referencial local da mesa (T é 4×4 afim)
+    homo = np.array([*ponto_kinect.ravel()[:3], 1.0], dtype=np.float64)
+    p_local = (T @ homo)[:3]  # (3,) — Z_local representa a topografia real
+
+    # Passo B: referencial local → pixels do projetor (modelo de Tsai completo)
+    px = projetar_pontos_tsai(
+        p_local.reshape(1, 3), rvec, tvec, camera_matrix, dist_coeffs
+    )  # (1, 2)
+    return float(px[0, 0]), float(px[0, 1])
 
 
 # ============================================================================

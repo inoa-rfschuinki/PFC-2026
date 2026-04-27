@@ -1,0 +1,50 @@
+# =============================================================================
+# .gitignore — AR Sandbox (PFC-2026)
+# =============================================================================
+
+# ── Python cache e bytecode ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── Ambientes virtuais ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ── Dados geoespaciais grandes (GeoTIFF) ─────────────────────────────────────
+*.tif
+*.tiff
+*.geotiff
+
+# ── Distribuição / build Python ───────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ── Cobertura de testes e relatórios ─────────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+junit*.xml
+
+# ── IDEs e editores ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ── Sistemas operacionais ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs e temporários ────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak

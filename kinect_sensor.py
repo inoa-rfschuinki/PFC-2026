@@ -411,27 +411,133 @@ class KinectSensor:
         ])
 
     @staticmethod
-    def profundidade_para_pontos(profundidade: np.ndarray) -> np.ndarray:
-        """Converte mapa de profundidade ``(H, W)`` em array ``(N, 3)``.
+    def profundidade_para_pontos(
+        profundidade: np.ndarray,
+        fx: float = _KINECT_FX,
+        fy: float = _KINECT_FY,
+        cx: float = _KINECT_CX,
+        cy: float = _KINECT_CY,
+        escala: float = 1000.0,
+    ) -> np.ndarray:
+        """Converte mapa de profundidade ``(H, W)`` em nuvem 3D ``(N, 3)`` em metros.
+
+        Aplica o modelo de câmera pinhole inverso:
+            X = (u − cx) · d_m / fx
+            Y = (v − cy) · d_m / fy
+            Z = d_m
 
         Parameters
         ----------
         profundidade : np.ndarray, shape (H, W)
-            Mapa de profundidade.
+            Mapa de profundidade em milímetros (uint16 ou float).
+        fx, fy : float
+            Distâncias focais em pixels (padrão: Kinect v1).
+        cx, cy : float
+            Centro óptico em pixels (padrão: Kinect v1).
+        escala : float
+            Fator de conversão raw → metros (padrão 1000 para mm→m).
 
         Returns
         -------
         np.ndarray, shape (N, 3), dtype float64
-            Array com colunas ``[u, v, d]``, filtrado para ``d > 0``.
+            Nuvem de pontos em metros ``[X, Y, Z]``.
+            Pontos com depth ≤ 0 são descartados.
         """
+        d_m = profundidade.astype(np.float64) / escala      # mm → m
         v_idx, u_idx = np.indices(profundidade.shape)
-        pontos = np.stack([
-            u_idx.flatten(),
-            v_idx.flatten(),
-            profundidade.flatten(),
-        ], axis=1).astype(np.float64)
 
-        return pontos[pontos[:, 2] > 0]
+        # Back-projection pinhole
+        X = (u_idx - cx) * d_m / fx
+        Y = (v_idx - cy) * d_m / fy
+        Z = d_m
+
+        pontos = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        return pontos[pontos[:, 2] > 1e-3]                  # descarta depth ≤ 1 mm
+
+    # ------------------------------------------------------------------
+    # Imagem colorida — captura BGR para detecção de padrões
+    # ------------------------------------------------------------------
+
+    def capturar_imagem_cor(self) -> np.ndarray:
+        """Retorna a imagem colorida BGR ``(H, W, 3)``.
+
+        Usada durante a calibração coplanar para detectar os cantos do
+        padrão de xadrez projetado sobre a areia.
+
+        Returns
+        -------
+        np.ndarray, shape (H, W, 3), dtype uint8
+            Imagem BGR.  No modo simulação retorna imagem preta.
+        """
+        if self.modo == ModoSensor.REAL_FREENECT:
+            return self._cor_freenect()
+        if self.modo == ModoSensor.REAL_OPEN3D:
+            return self._cor_open3d()
+        return self._cor_simulada()
+
+    def _cor_freenect(self) -> np.ndarray:
+        """Captura frame RGB via freenect (Kinect v1) e converte para BGR."""
+        rgb, _ = self._freenect_mod.sync_get_video()
+        return cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2BGR)
+
+    def _cor_open3d(self) -> np.ndarray:
+        """Captura frame colorido via Open3D (Azure Kinect / RealSense)."""
+        import open3d as o3d  # noqa: F811
+        rgbd = self._o3d_sensor.capture_frame(True)
+        if rgbd is None:
+            logger.warning("Open3D: frame de cor vazio.")
+            return self._cor_simulada()
+        color = np.asarray(rgbd.color)
+        return cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
+
+    def _cor_simulada(self) -> np.ndarray:
+        """Imagem preta para o modo simulação (sem câmera RGB real)."""
+        W, H = self.resolucao
+        return np.zeros((H, W, 3), dtype=np.uint8)
+
+    def pixels_para_3d(
+        self,
+        pixels_uv: np.ndarray,
+        profundidade: np.ndarray,
+    ) -> np.ndarray:
+        """Obtém coordenadas 3D (metros) para um conjunto de pixels ``(u, v)``.
+
+        Para cada pixel ``(u, v)`` lê a profundidade no mapa e aplica a
+        back-projection pinhole com os intrínsecos do Kinect:
+
+            X = (u − cx) · d_m / fx
+            Y = (v − cy) · d_m / fy
+            Z = d_m
+
+        Pixels fora da imagem ou com profundidade zero recebem ``[NaN, NaN, NaN]``.
+
+        Parameters
+        ----------
+        pixels_uv : np.ndarray, shape (M, 2)
+            Coordenadas ``(u, v)`` dos pixels de interesse.
+        profundidade : np.ndarray, shape (H, W)
+            Mapa de profundidade em milímetros.
+
+        Returns
+        -------
+        np.ndarray, shape (M, 3), dtype float64
+            Coordenadas 3D em metros.  ``NaN`` onde depth inválido.
+        """
+        H, W = profundidade.shape
+        pts = pixels_uv.reshape(-1, 2)
+        resultado = np.full((len(pts), 3), np.nan, dtype=np.float64)
+
+        for i, (u, v) in enumerate(pts):
+            ui, vi = int(round(float(u))), int(round(float(v)))
+            if 0 <= ui < W and 0 <= vi < H:
+                d_mm = float(profundidade[vi, ui])
+                if d_mm > 0.0:
+                    d_m = d_mm / 1000.0
+                    resultado[i, 0] = (ui - _KINECT_CX) * d_m / _KINECT_FX
+                    resultado[i, 1] = (vi - _KINECT_CY) * d_m / _KINECT_FY
+                    resultado[i, 2] = d_m
+
+        return resultado
 
     # ------------------------------------------------------------------
     # Imagem colorida para exibição de debug

@@ -63,7 +63,9 @@ from motor_caixao_areia import (
     projetar_pontos_tsai,
     encontrar_cantos_tabuleiro,
     calibrar_projetor,
+    calibrar_coplanar,
     gerar_imagem_grade_cores,
+    gerar_imagem_xadrez,
 )
 
 # ── Adaptador MDE ────────────────────────────────────────────────────
@@ -333,6 +335,7 @@ def _executar_calibracao(sensor: KinectSensor) -> DadosCalibracao:
         )
     print(f"  Pontos capturados: {pontos.shape[0]:,}")
 
+    # ── Passos 1+2: SVD + Gram-Schmidt → T (Kinect → Mesa) ───────────────
     normal, d, centroide, X, Y, Z, T = pipeline_plano_e_base(pontos)
 
     dados.T = T
@@ -341,7 +344,93 @@ def _executar_calibracao(sensor: KinectSensor) -> DadosCalibracao:
 
     print(f"  Plano: {normal[0]:.4f}x + {normal[1]:.4f}y "
           f"+ {normal[2]:.4f}z + {d:.2f} = 0")
-    print(f"  Centroide: ({centroide[0]:.1f}, {centroide[1]:.1f}, {centroide[2]:.1f})")
+    print(f"  Centroide: ({centroide[0]:.2f}, {centroide[1]:.2f}, {centroide[2]:.2f}) m")
+
+    # ── Passos 3–5: Calibração Coplanar do Projetor via Xadrez ──────────
+    _TAMANHO_TABULEIRO = (7, 5)  # cantos internos
+    print()
+    print("  Passo 3-5: Calibração Coplanar do Projetor")
+    print("  Projetando padrão de xadrez — posicione a areia PLANA.")
+    print("  [SPACE] Capturar  |  [ESC] Usar aproximação geométrica")
+
+    img_xadrez, cantos_projetor = gerar_imagem_xadrez(
+        RESOLUCAO_PROJETOR, _TAMANHO_TABULEIRO
+    )
+    cv2.imshow(JANELA_PROJECAO, img_xadrez)
+
+    # Aguardar SPACE (capturar) ou ESC (pular)
+    _capturar = False
+    while True:
+        tecla_cal = cv2.waitKey(30) & 0xFF
+        if tecla_cal == 32:       # SPACE
+            _capturar = True
+            break
+        elif tecla_cal == 27:     # ESC
+            print("  ⚠ Xadrez pulado — usando aproximação geométrica.")
+            break
+
+    _coplanar_ok = False
+    if _capturar:
+        imagem_cor      = sensor.capturar_imagem_cor()
+        profundidade_cal = sensor.capturar_profundidade()
+
+        encontrado, cantos_kinect = encontrar_cantos_tabuleiro(
+            imagem_cor, _TAMANHO_TABULEIRO
+        )
+
+        if encontrado and cantos_kinect is not None:
+            cantos_kinect_xy = cantos_kinect.reshape(-1, 2)          # (M, 2)
+            pontos_3d_grid   = sensor.pixels_para_3d(cantos_kinect_xy, profundidade_cal)
+
+            validos            = ~np.any(np.isnan(pontos_3d_grid), axis=1)
+            pontos_3d_grid     = pontos_3d_grid[validos]
+            cantos_proj_validos = cantos_projetor[validos]
+
+            if len(pontos_3d_grid) >= 4:
+                try:
+                    _, cam_mat, dist, rvec, tvec, _, _ = calibrar_coplanar(
+                        nuvem_areia=pontos,
+                        pontos_3d_grid_kinect=pontos_3d_grid,
+                        pontos_2d_grid_projetor=cantos_proj_validos,
+                        tamanho_imagem=RESOLUCAO_PROJETOR,
+                    )
+                    dados.camera_matrix = cam_mat
+                    dados.dist_coeffs   = dist.ravel()
+                    dados.rvec          = rvec
+                    dados.tvec          = tvec
+                    _coplanar_ok = True
+                    print(f"  ✓ Calibração coplanar OK — "
+                          f"{len(pontos_3d_grid)} cantos detectados.")
+                except Exception as e:
+                    print(f"  ⚠ calibrar_coplanar falhou ({e}); "
+                          "usando aproximação geométrica.")
+            else:
+                print(f"  ⚠ Apenas {len(pontos_3d_grid)} cantos com depth válida "
+                      "(mínimo 4); usando aproximação geométrica.")
+        else:
+            print("  ⚠ Xadrez não detectado na imagem do Kinect; "
+                  "usando aproximação geométrica.")
+
+    if not _coplanar_ok:
+        # Aproximação geométrica: projeta [0,L]×[0,C] → pixels do projetor
+        # assumindo projetor acima do centroide da mesa, olhando para baixo.
+        largura_p, altura_p = RESOLUCAO_PROJETOR
+        d_cam   = max(float(centroide[2]), 0.5)  # usa altura real (em metros)
+        fx_ap   = largura_p * d_cam / LARGURA_MESA
+        fy_ap   = altura_p  * d_cam / COMPRIMENTO_MESA
+        dados.camera_matrix = np.array([
+            [fx_ap, 0.0,   largura_p / 2.0],
+            [0.0,   fy_ap, altura_p  / 2.0],
+            [0.0,   0.0,   1.0            ],
+        ])
+        dados.dist_coeffs = np.zeros(5)
+        dados.rvec = np.zeros((3, 1))
+        dados.tvec = np.array([[LARGURA_MESA / 2.0],
+                               [COMPRIMENTO_MESA / 2.0],
+                               [d_cam]])
+        print(f"  Aprox. geométrica: fx={fx_ap:.1f}, fy={fy_ap:.1f}, "
+              f"d={d_cam:.2f} m")
+
     print("  ✓ Calibração concluída.")
     print("=" * 50 + "\n")
 

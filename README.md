@@ -80,38 +80,56 @@ O resultado é uma **projeção sólida e limpa** sobre a areia — como "curvas
 
 ---
 
+## Calibração Coplanar — Solução para Areia Plana
+
+A calibração 3D clássica (DLT não-coplanar) falha quando a areia está inicialmente plana: a variação em Z é apenas ruído do sensor, tornando a matriz de calibração mal-condicionada. O sistema resolve isso em **5 passos** durante o estado `CALIBRACAO`:
+
+| Passo | Função | O que faz |
+|---|---|---|
+| **1 — Plane Fitting** | `ajustar_plano_svd` | SVD sobre a nuvem ruidosa → normal $\hat{n}$ e centroide $\bar{p}$ |
+| **2 — Base Local** | `construir_base_mesa` + `montar_matriz_transformacao` | Gram-Schmidt + Produto Vetorial → base ortonormal → matriz afim $T$ (4×4); areia passa a ser $Z_{local}=0$ |
+| **3 — Grid no Local** | `transformar_pontos(T, \ldots)` | Pontos 3D do xadrez → referencial local; $Z_{local}\approx 0$ |
+| **4 — Tsai Coplanar** | `calibrar_coplanar` → `cv2.calibrateCamera` | Força $Z_{local}=0$ nos objectPoints → sistema bem-condicionado → $K$, $dist$, $rvec$, $tvec$ |
+| **5 — Loop RGBD** | `projetar_ponto_rgbd` | No loop em tempo real: $T@p_{kinect}$ → $Z_{local}\neq 0$ (topografia real) → `projectPoints` → pixel $(u,v)$ |
+
+### Xadrez de Calibração
+
+Ao pressionar **C**, o sistema projeta automaticamente um padrão de xadrez (7×5 cantos internos) sobre a areia plana. O operador pressiona **SPACE** para capturar. O Kinect detecta os cantos com `cv2.findChessboardCorners` e faz a back-projection para 3D. Se o xadrez não for detectado, o sistema usa uma **aproximação geométrica** como fallback.
+
+---
+
 ## Arquitetura — 3 Camadas
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                          main.py                               │
-│               Máquina de Estados (Orquestrador)                │
-│  INIT → IDLE → CALIBRACAO → AR_LOOP → (loop contínuo)         │
-│                                                                │
-│  Janelas:  Projecao_Areia ← Grade de quadrados AR (projetor)  │
-│            Gabarito_MDE   ← Heatmap referência (monitor)       │
-│  Mouse:    Botão Esq → cavar | Botão Dir → preencher          │
-└────────┬──────────────┬──────────────┬─────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                            main.py                                 │
+│                 Máquina de Estados (Orquestrador)                  │
+│  INIT → IDLE → CALIBRACAO → AR_LOOP → (loop contínuo)             │
+│                                                                    │
+│  Calibração: SVD+Gram-Schmidt → xadrez projetado → Tsai coplanar  │
+│  Janelas:  Projecao_Areia ← Grade de quadrados AR (projetor)      │
+│            Gabarito_MDE   ← Heatmap referência (monitor)           │
+│  Mouse:    Botão Esq → cavar | Botão Dir → preencher              │
+└────────┬──────────────┬──────────────┬─────────────────────────────┘
          │              │              │
-┌────────▼────────┐ ┌──▼───────────┐ ┌▼──────────────┐
-│ kinect_sensor.py │ │motor_caixao_ │ │mde_cartografia│
-│ KinectSensor     │ │ areia.py     │ │   .py         │
-│ (OOP + Fallback  │ │ (Álgebra     │ │ AdaptadorMDE  │
-│  + Grade Persist.│ │  Linear +    │ │ (GeoTIFF +    │
-│  + modificar_    │ │  Discretiz.) │ │  Fallback     │
-│  areia())        │ │ SVD, Gram-   │ │  Gaussiano +  │
-│                  │ │ Schmidt,     │ │  Heatmap)     │
-│ Open3D/freenect  │ │ Tsai, Grade  │ │               │
-│ → Simulação auto │ │ fillPoly     │ │               │
-└──────────────────┘ └──────────────┘ └───────────────┘
+┌────────▼────────┐ ┌──▼───────────────┐ ┌▼──────────────┐
+│ kinect_sensor.py │ │motor_caixao_     │ │mde_cartografia│
+│ KinectSensor     │ │areia.py          │ │   .py         │
+│ OOP + Fallback   │ │ SVD, Gram-Schmidt│ │ AdaptadorMDE  │
+│ Grade persistente│ │ gerar_xadrez()   │ │ GeoTIFF +     │
+│ modificar_areia()│ │ calibrar_        │ │ Fallback      │
+│ capturar_cor()   │ │  coplanar()      │ │ Gaussiano +   │
+│ pixels_para_3d() │ │ projetar_rgbd()  │ │ Heatmap       │
+│ back-projection  │ │ Grade fillPoly   │ │               │
+└──────────────────┘ └──────────────────┘ └───────────────┘
 ```
 
 | Camada | Módulo | Responsabilidade |
 |---|---|---|
-| **Hardware** | `kinect_sensor.py` | Classe `KinectSensor`: Open3D → freenect → simulação com **grade persistente** + `modificar_areia()` |
-| **Lógica** | `motor_caixao_areia.py` | Álgebra linear pura: SVD, Gram-Schmidt, Transformação 4×4, Tsai, **discretização em grade**, coloração por célula, `fillPoly` |
-| **Dados** | `mde_cartografia.py` | Classe `AdaptadorMDE`: GeoTIFF via rasterio → fallback Morro Gaussiano + heatmap |
-| **Orquestração** | `main.py` | Máquina de estados, dual-window, **mouse callback** (`cv2.setMouseCallback`) |
+| **Hardware** | `kinect_sensor.py` | `KinectSensor`: Open3D → freenect → simulação; back-projection pinhole correta; `capturar_imagem_cor()`, `pixels_para_3d()` |
+| **Lógica** | `motor_caixao_areia.py` | Álgebra linear: SVD, Gram-Schmidt, $T$ (4×4), `gerar_imagem_xadrez`, `calibrar_coplanar`, `projetar_ponto_rgbd`, grade com `fillPoly` |
+| **Dados** | `mde_cartografia.py` | `AdaptadorMDE`: GeoTIFF via rasterio → fallback Morro Gaussiano + heatmap |
+| **Orquestração** | `main.py` | Máquina de estados, dual-window, xadrez de calibração, fallback geométrico, mouse callback |
 
 ---
 
@@ -119,13 +137,14 @@ O resultado é uma **projeção sólida e limpa** sobre a areia — como "curvas
 
 ```
 PFC-2026/
-├── main.py                    # Máquina de Estados + Mouse Callback — ponto de entrada
-├── kinect_sensor.py           # KinectSensor OOP com grade persistente + modificar_areia()
-├── motor_caixao_areia.py      # Motor matemático (SVD, Gram-Schmidt, Tsai, Grade Discretizada)
+├── main.py                    # Máquina de Estados + Calibração Coplanar + Mouse Callback
+├── kinect_sensor.py           # KinectSensor: back-projection, capturar_cor, pixels_para_3d
+├── motor_caixao_areia.py      # Motor matemático: SVD, Gram-Schmidt, Tsai, Calibração Coplanar
 ├── mde_cartografia.py         # AdaptadorMDE: GeoTIFF + fallback Gaussiano + heatmap
 │
 ├── test_motor_caixao.py       # 26 testes unitários automatizados
 ├── DOCUMENTACAO_OFICIAL.md    # Documentação acadêmica completa para a banca
+├── .gitignore                 # Ignora __pycache__, .venv, *.tif, etc.
 └── README.md                  # Este arquivo
 ```
 
@@ -214,7 +233,9 @@ FORCAR_SIMULACAO     = False             # True para ignorar Kinect
 
 | Tecla | Ação |
 |---|---|
-| **C** | Calibrar (SVD + Gram-Schmidt + Matriz 4×4) |
+| **C** | Calibrar — SVD + Gram-Schmidt + xadrez coplanar + Tsai |
+| **SPACE** | Capturar xadrez (durante a etapa de calibração) |
+| **ESC** (no xadrez) | Pular captura do xadrez — usa aproximação geométrica |
 | **F** | Toggle tela cheia na janela Projecao_Areia |
 | **Q** / **ESC** | Encerrar |
 
@@ -231,16 +252,18 @@ FORCAR_SIMULACAO     = False             # True para ignorar Kinect
 
 | Passo | Ação | Resultado esperado |
 |---|---|---|
-| 1 | `python main.py` | Duas janelas abrem: **Projecao_Areia** e **Gabarito_MDE** |
-| 2 | Pressionar **C** | Calibração automática (modo simulação) ou SVD (modo real) |
-| 3 | Observar **Projecao_Areia** | Grade contínua de quadrados coloridos: bordas vermelhas, anel verde, centro azul |
-| 4 | Observar **Gabarito_MDE** | Heatmap do Morro Gaussiano (ou GeoTIFF real) como referência |
-| 5 | **Arrastar botão direito** no centro azul | Quadrados mudam de azul → verde (areia subindo até o alvo) |
-| 6 | **Arrastar botão esquerdo** nas bordas vermelhas | Quadrados mudam de vermelho → verde (areia descendo até o alvo) |
-| 7 | Continuar interagindo | Objetivo: tornar **toda a grade verde** — terreno virtual replica o MDE |
-| 8 | Pressionar **F** | Tela cheia na janela de projeção (para projetor real) |
-| 9 | Pressionar **C** | Recalibração (demonstra robustez do pipeline) |
-| 10 | Pressionar **Q** | Encerramento limpo |
+| 1 | `python main.py` | GUI de configuração abre; selecionar mapa ou marcar "Modo Demo" |
+| 2 | Clicar **INICIAR** | Duas janelas: **Projecao_Areia** (projetor) e **Gabarito_MDE** (monitor) |
+| 3 | Pressionar **C** — modo simulação | Calibração automática: $T$ = identidade, $K$ geométrica |
+| 4 | Pressionar **C** — hardware real | (1) SVD+Gram-Schmidt → $T$; (2) xadrez projetado aparece na areia |
+| 5 | Pressionar **SPACE** | Kinect detecta cantos do xadrez → `calibrar_coplanar` → $K$, $rvec$, $tvec$ reais |
+| 6 | Observar **Projecao_Areia** | Grade contínua: bordas vermelhas, anel verde, centro azul |
+| 7 | Observar **Gabarito_MDE** | Heatmap do Morro Gaussiano (ou GeoTIFF) como referência |
+| 8 | **Arrastar botão direito** no centro azul | Quadrados mudam de azul → verde (areia subindo até o alvo) |
+| 9 | **Arrastar botão esquerdo** nas bordas vermelhas | Quadrados mudam de vermelho → verde (areia descendo até o alvo) |
+| 10 | Pressionar **F** | Tela cheia na janela de projeção |
+| 11 | Pressionar **C** | Recalibração ao vivo (demonstra robustez) |
+| 12 | Pressionar **Q** | Encerramento limpo |
 
 > **Dica para a banca:** a interação com o mouse demonstra em tempo real todo o pipeline matemático (discretização → média espacial → comparação MDE → projeção Tsai → renderização) sem necessidade de hardware físico.
 
@@ -252,7 +275,7 @@ FORCAR_SIMULACAO     = False             # True para ignorar Kinect
 
 ```bash
 python -m unittest test_motor_caixao -v
-# Resultado: 25 passed, 1 skipped (Open3D não instalado)
+# Resultado: 26 passed, 1 skipped (Open3D não instalado)
 ```
 
 | Classe | Testes | Componente |
@@ -266,6 +289,29 @@ python -m unittest test_motor_caixao -v
 | `TestLeituraRGBD` | 1 | Importação condicional Open3D |
 | `TestMDEColoracao` | 6 | Vermelho/Azul/Verde, limites, mock rampa |
 | `TestPipeline` | 2 | Integração completa Passos 1+2 |
+
+---
+
+## Alterações Recentes
+
+### Correções de Bugs (Abril 2026)
+
+| # | Módulo | Problema | Solução |
+|---|---|---|---|
+| B1 | `kinect_sensor.py` | `profundidade_para_pontos` retornava `[u,v,d]` em pixels | Back-projection pinhole correta: `X=(u−cx)·d/fx`, retorna metros |
+| B2 | `main.py` | Modo real deixava `K`, `rvec`, `tvec` em valores mock hardcoded | Integrado ao fluxo `calibrar_coplanar` com xadrez real |
+| B3 | `main.py` | `calibrar_coplanar` e `gerar_imagem_xadrez` não importadas | Adicionadas ao import |
+| B4 | `motor_caixao_areia.py` | `gerar_imagem_xadrez` não existia | Criada: xadrez BGR + array `(M,2)` de cantos em pixels do projetor |
+| B5 | `kinect_sensor.py` | `capturar_imagem_cor()` não existia | Adicionada para freenect / Open3D / simulação |
+| B6 | `kinect_sensor.py` | `pixels_para_3d()` não existia | Adicionada: back-projection por lookup de depth para M pixels |
+
+### Novas Funcionalidades (Abril 2026)
+
+- **`gerar_imagem_xadrez()`** — gera padrão de xadrez centralizado para calibração coplanar.
+- **`calibrar_coplanar()`** — orquestra os 5 passos do supervisor: SVD → Gram-Schmidt → grid local → Z=0 → `cv2.calibrateCamera`.
+- **`projetar_ponto_rgbd()`** — hot-path do loop AR: `T@p_kinect` → `projectPoints` → pixel `(u,v)`.
+- **`capturar_imagem_cor()`** e **`pixels_para_3d()`** em `KinectSensor`.
+- **`.gitignore`** adicionado; `__pycache__` removido do repositório remoto.
 
 ---
 
